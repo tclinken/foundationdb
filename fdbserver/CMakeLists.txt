@@ -176,7 +176,8 @@ set(FDBSERVER_SRCS
   workloads/WorkerErrors.actor.cpp
   workloads/workloads.actor.h
   workloads/WriteBandwidth.actor.cpp
-  workloads/WriteDuringRead.actor.cpp)
+  workloads/WriteDuringRead.actor.cpp
+  workloads/WritesSkewedRangedReads.actor.cpp)
 
 set(java_workload_docstring "Build the Java workloads (makes fdbserver link against JNI)")
 if(FDB_RELEASE)
