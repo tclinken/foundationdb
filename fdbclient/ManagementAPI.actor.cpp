@@ -36,7 +36,7 @@ ACTOR static Future<vector<AddressExclusion>> getExcludedServers(Transaction* tr
 bool isInteger(const std::string& s) {
 	if( s.empty() ) return false;
 	char *p;
-	auto ign = strtol(s.c_str(), &p, 10);
+	strtol(s.c_str(), &p, 10);
 	return (*p == 0);
 }
 
@@ -145,6 +145,13 @@ std::map<std::string, std::string> configForToken( std::string const& mode ) {
 		tLogPolicy = Reference<IReplicationPolicy>(new PolicyAcross(2, "data_hall",
 			Reference<IReplicationPolicy>(new PolicyAcross(2, "zoneid", Reference<IReplicationPolicy>(new PolicyOne())))
 		));
+	} else if(mode == "three_data_hall_fallback") {
+		redundancy="2";
+		log_replicas="4";
+		storagePolicy = Reference<IReplicationPolicy>(new PolicyAcross(2, "data_hall", Reference<IReplicationPolicy>(new PolicyOne())));
+		tLogPolicy = Reference<IReplicationPolicy>(new PolicyAcross(2, "data_hall",
+			Reference<IReplicationPolicy>(new PolicyAcross(2, "zoneid", Reference<IReplicationPolicy>(new PolicyOne())))
+		));
 	} else
 		redundancySpecified = false;
 	if (redundancySpecified) {
@@ -154,11 +161,11 @@ std::map<std::string, std::string> configForToken( std::string const& mode ) {
 
 		BinaryWriter policyWriter(IncludeVersion());
 		serializeReplicationPolicy(policyWriter, storagePolicy);
-		out[p+"storage_replication_policy"] = policyWriter.toStringRef().toString();
+		out[p+"storage_replication_policy"] = policyWriter.toValue().toString();
 
 		policyWriter = BinaryWriter(IncludeVersion());
 		serializeReplicationPolicy(policyWriter, tLogPolicy);
-		out[p+"log_replication_policy"] = policyWriter.toStringRef().toString();
+		out[p+"log_replication_policy"] = policyWriter.toValue().toString();
 		return out;
 	}
 
@@ -194,7 +201,7 @@ std::map<std::string, std::string> configForToken( std::string const& mode ) {
 
 		BinaryWriter policyWriter(IncludeVersion());
 		serializeReplicationPolicy(policyWriter, remoteTLogPolicy);
-		out[p+"remote_log_policy"] = policyWriter.toStringRef().toString();
+		out[p+"remote_log_policy"] = policyWriter.toValue().toString();
 		return out;
 	}
 
@@ -212,7 +219,7 @@ ConfigurationResult::Type buildConfiguration( std::vector<StringRef> const& mode
 
 		for( auto t = m.begin(); t != m.end(); ++t ) {
 			if( outConf.count( t->first ) ) {
-				TraceEvent(SevWarnAlways, "ConflictingOption").detail("Option", printable(StringRef(t->first)));
+				TraceEvent(SevWarnAlways, "ConflictingOption").detail("Option", t->first);
 				return ConfigurationResult::CONFLICTING_OPTIONS;
 			}
 			outConf[t->first] = t->second;
@@ -224,7 +231,7 @@ ConfigurationResult::Type buildConfiguration( std::vector<StringRef> const& mode
 		Reference<IReplicationPolicy> storagePolicy = Reference<IReplicationPolicy>(new PolicyAcross(storageCount, "zoneid", Reference<IReplicationPolicy>(new PolicyOne())));
 		BinaryWriter policyWriter(IncludeVersion());
 		serializeReplicationPolicy(policyWriter, storagePolicy);
-		outConf[p+"storage_replication_policy"] = policyWriter.toStringRef().toString();
+		outConf[p+"storage_replication_policy"] = policyWriter.toValue().toString();
 	}
 
 	if(!outConf.count(p + "log_replication_policy") && outConf.count(p + "log_replicas")) {
@@ -232,7 +239,7 @@ ConfigurationResult::Type buildConfiguration( std::vector<StringRef> const& mode
 		Reference<IReplicationPolicy> logPolicy = Reference<IReplicationPolicy>(new PolicyAcross(logCount, "zoneid", Reference<IReplicationPolicy>(new PolicyOne())));
 		BinaryWriter policyWriter(IncludeVersion());
 		serializeReplicationPolicy(policyWriter, logPolicy);
-		outConf[p+"log_replication_policy"] = policyWriter.toStringRef().toString();
+		outConf[p+"log_replication_policy"] = policyWriter.toValue().toString();
 	}
 	return ConfigurationResult::SUCCESS;
 }
@@ -509,6 +516,12 @@ ConfigureAutoResult parseConfig( StatusObject const& status ) {
 		log_replication = 4;
 	} else if( result.old_replication == "three_datacenter_fallback" ) {
 		storage_replication = 4;
+		log_replication = 4;
+	} else if( result.old_replication == "three_data_hall" ) {
+		storage_replication = 3;
+		log_replication = 4;
+	} else if( result.old_replication == "three_data_hall_fallback" ) {
+		storage_replication = 2;
 		log_replication = 4;
 	} else
 		return ConfigureAutoResult();
@@ -1289,6 +1302,54 @@ ACTOR Future<vector<AddressExclusion>> getExcludedServers( Database cx ) {
 	}
 }
 
+ACTOR Future<Void> printHealthyZone( Database cx ) {
+	state Transaction tr(cx);
+	loop {
+		try {
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			Optional<Value> val = wait( tr.get(healthyZoneKey) );
+			if(!val.present() || decodeHealthyZoneValue(val.get()).second <= tr.getReadVersion().get()) {
+				printf("No ongoing maintenance.\n");
+			} else {
+				auto healthyZone = decodeHealthyZoneValue(val.get());
+				printf("Maintenance for zone %s will continue for %d seconds.\n", healthyZone.first.toString().c_str(), (healthyZone.second-tr.getReadVersion().get())/CLIENT_KNOBS->CORE_VERSIONSPERSECOND);
+			}
+			return Void();
+		} catch( Error &e ) {
+			wait(tr.onError(e));
+		}
+	}
+}
+
+ACTOR Future<Void> clearHealthyZone( Database cx ) {
+	state Transaction tr(cx);
+	loop {
+		try {
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			tr.clear(healthyZoneKey);
+			wait(tr.commit());
+			return Void();
+		} catch( Error &e ) {
+			wait(tr.onError(e));
+		}
+	}
+}
+
+ACTOR Future<Void> setHealthyZone( Database cx, StringRef zoneId, double seconds ) {
+	state Transaction tr(cx);
+	loop {
+		try {
+			tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+			Version readVersion = wait(tr.getReadVersion());
+			tr.set(healthyZoneKey, healthyZoneValue(zoneId, readVersion + (seconds*CLIENT_KNOBS->CORE_VERSIONSPERSECOND)));
+			wait(tr.commit());
+			return Void();
+		} catch( Error &e ) {
+			wait(tr.onError(e));
+		}
+	}
+}
+
 ACTOR Future<int> setDDMode( Database cx, int mode ) {
 	state Transaction tr(cx);
 	state int oldMode = -1;
@@ -1308,10 +1369,10 @@ ACTOR Future<int> setDDMode( Database cx, int mode ) {
 			if (!mode) {
 				BinaryWriter wrMyOwner(Unversioned());
 				wrMyOwner << dataDistributionModeLock;
-				tr.set( moveKeysLockOwnerKey, wrMyOwner.toStringRef() );
+				tr.set( moveKeysLockOwnerKey, wrMyOwner.toValue() );
 			}
 
-			tr.set( dataDistributionModeKey, wr.toStringRef() );
+			tr.set( dataDistributionModeKey, wr.toValue() );
 
 			wait( tr.commit() );
 			return oldMode;

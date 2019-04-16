@@ -75,7 +75,6 @@ ServerKnobs::ServerKnobs(bool randomize, ClientKnobs* clientKnobs) {
 	init( DISK_QUEUE_FILE_SHRINK_BYTES,                      100<<20 ); // BUGGIFYd per file within the DiskQueue
 	init( TLOG_DEGRADED_DELAY_COUNT,                               5 );
 	init( TLOG_DEGRADED_DURATION,                                5.0 );
-	init( TLOG_DEGRADED_RESET_INTERVAL,                     48*60*60 ); if ( randomize && BUGGIFY ) TLOG_DEGRADED_RESET_INTERVAL = 10;
 
 	// Data distribution queue
 	init( HEALTH_POLL_TIME,                                      1.0 );
@@ -349,10 +348,10 @@ ServerKnobs::ServerKnobs(bool randomize, ClientKnobs* clientKnobs) {
 	init(SERVER_MEM_LIMIT, 8LL << 30);
 
 	//Ratekeeper
-	bool slowRateKeeper = randomize && BUGGIFY;
-	init( SMOOTHING_AMOUNT,                                      1.0 ); if( slowRateKeeper ) SMOOTHING_AMOUNT = 5.0;
-	init( SLOW_SMOOTHING_AMOUNT,                                10.0 ); if( slowRateKeeper ) SLOW_SMOOTHING_AMOUNT = 50.0;
-	init( METRIC_UPDATE_RATE,                                     .1 ); if( slowRateKeeper ) METRIC_UPDATE_RATE = 0.5;
+	bool slowRatekeeper = randomize && BUGGIFY;
+	init( SMOOTHING_AMOUNT,                                      1.0 ); if( slowRatekeeper ) SMOOTHING_AMOUNT = 5.0;
+	init( SLOW_SMOOTHING_AMOUNT,                                10.0 ); if( slowRatekeeper ) SLOW_SMOOTHING_AMOUNT = 50.0;
+	init( METRIC_UPDATE_RATE,                                     .1 ); if( slowRatekeeper ) METRIC_UPDATE_RATE = 0.5;
 	init( DETAILED_METRIC_UPDATE_RATE,                           5.0 );
 
 	bool smallStorageTarget = randomize && BUGGIFY;
@@ -417,6 +416,9 @@ ServerKnobs::ServerKnobs(bool randomize, ClientKnobs* clientKnobs) {
 	//Worker
 	init( WORKER_LOGGING_INTERVAL,                               5.0 );
 	init( INCOMPATIBLE_PEER_DELAY_BEFORE_LOGGING,                5.0 );
+	init( DEGRADED_RESET_INTERVAL,                          24*60*60 ); if ( randomize && BUGGIFY ) DEGRADED_RESET_INTERVAL = 10;
+	init( DEGRADED_WARNING_LIMIT,                                  1 );
+	init( DEGRADED_WARNING_RESET_DELAY,                   7*24*60*60 );
 
 	// Test harness
 	init( WORKER_POLL_DELAY,                                     1.0 );

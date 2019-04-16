@@ -49,6 +49,7 @@ FlowKnobs::FlowKnobs(bool randomize, bool isSimulated) {
 	init( RANDOMSEED_RETRY_LIMIT,                                4 );
 	init( FAST_ALLOC_LOGGING_BYTES,                           10e6 );
 	init( HUGE_ARENA_LOGGING_BYTES,                          100e6 );
+	init( HUGE_ARENA_LOGGING_INTERVAL,                         5.0 );
 
 	//connectionMonitor
 	init( CONNECTION_MONITOR_LOOP_TIME,   isSimulated ? 0.75 : 1.0 ); if( randomize && BUGGIFY ) CONNECTION_MONITOR_LOOP_TIME = 6.0;
@@ -63,6 +64,8 @@ FlowKnobs::FlowKnobs(bool randomize, bool isSimulated) {
 	init( RECONNECTION_TIME_GROWTH_RATE,                       1.2 );
 	init( RECONNECTION_RESET_TIME,                             5.0 );
 	init( CONNECTION_ACCEPT_DELAY,                            0.01 );
+	init( TOO_MANY_CONNECTIONS_CLOSED_RESET_DELAY,             5.0 );
+	init( TOO_MANY_CONNECTIONS_CLOSED_TIMEOUT,                20.0 );
 
 	init( TLS_CERT_REFRESH_DELAY_SECONDS,                 12*60*60 );
 

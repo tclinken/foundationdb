@@ -24,6 +24,7 @@
 #include "flow/Trace.h"
 #include "flow/Error.h"
 #include "flow/Knobs.h"
+#include "flow/flow.h"
 
 #include <cstdint>
 #include <unordered_map>
@@ -82,6 +83,22 @@ void setFastAllocatorThreadInitFunction( ThreadInitFunction f ) {
 }
 
 int64_t g_hugeArenaMemory = 0;
+
+double hugeArenaLastLogged = 0;
+std::map<std::string, std::pair<int,int>> hugeArenaTraces;
+
+void hugeArenaSample(int size) {
+	auto& info = hugeArenaTraces[platform::get_backtrace()];
+	info.first++;
+	info.second+=size;
+	if(now() - hugeArenaLastLogged > FLOW_KNOBS->HUGE_ARENA_LOGGING_INTERVAL) {
+		for(auto& it : hugeArenaTraces) {
+			TraceEvent("HugeArenaSample").detail("Count", it.second.first).detail("Size", it.second.second).detail("Backtrace", it.first);
+		}
+		hugeArenaLastLogged = now();
+		hugeArenaTraces.clear();
+	}
+}
 
 #ifdef ALLOC_INSTRUMENTATION
 INIT_SEG std::map<const char*, AllocInstrInfo> allocInstr;
@@ -216,6 +233,7 @@ long long FastAllocator<Size>::getActiveThreads() {
 	return globalData()->activeThreads;
 }
 
+#if FAST_ALLOCATOR_DEBUG
 static int64_t getSizeCode(int i) {
 	switch (i) {
 		case 16: return 1;
@@ -231,6 +249,7 @@ static int64_t getSizeCode(int i) {
 		default: return 11;
 	}
 }
+#endif
 
 template<int Size>
 void *FastAllocator<Size>::allocate() {

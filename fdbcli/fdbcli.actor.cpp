@@ -40,6 +40,7 @@
 
 #include "fdbcli/FlowLineNoise.h"
 
+#include <type_traits>
 #include <signal.h>
 
 #ifdef __unixish__
@@ -527,6 +528,10 @@ void initHelp() {
 		"force_recovery_with_data_loss <DCID>",
 		"Force the database to recover into DCID",
 		"A forced recovery will cause the database to lose the most recently committed mutations. The amount of mutations that will be lost depends on how far behind the remote datacenter is. This command will change the region configuration to have a positive priority for the chosen DCID, and a negative priority for all other DCIDs. This command will set usable_regions to 1. If the database has already recovered, this command does nothing.\n");
+	helpMap["maintenance"] = CommandHelp(
+		"maintenance [on|off] [ZONEID] [SECONDS]",
+		"mark a zone for maintenance",
+		"Calling this command with `on' prevents data distribution from moving data away from the processes with the specified ZONEID. Data distribution will automatically be turned back on for ZONEID after the specified SECONDS have elapsed, or after a storage server with a different ZONEID fails. Only one ZONEID can be marked for maintenance. Calling this command with no arguments will display any ongoing maintenance. Calling this command with `off' will disable maintenance.\n");
 
 	hiddenCommands.insert("expensive_data_check");
 	hiddenCommands.insert("datadistribution");
@@ -578,7 +583,7 @@ std::string getCoordinatorsInfoString(StatusObjectReader statusObj) {
 		for (StatusObjectReader coor : coordinatorsArr)
 			outputString += format("\n  %s  (%s)", coor["address"].get_str().c_str(), coor["reachable"].get_bool() ? "reachable" : "unreachable");
 	}
-	catch (std::runtime_error& e){
+	catch (std::runtime_error& ){
 		outputString = "\n  Unable to retrieve list of coordination servers";
 	}
 
@@ -609,7 +614,7 @@ std::string getProcessAddressByServerID(StatusObjectReader processesMap, std::st
 				}
 			}
 		}
-		catch (std::exception &e) {
+		catch (std::exception& ) {
 			// If an entry in the process map is badly formed then something will throw. Since we are
 			// looking for a positive match, just ignore any read execeptions and move on to the next proc
 		}
@@ -811,7 +816,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					}
 				}
 			}
-			catch (std::runtime_error& e){ }
+			catch (std::runtime_error& ){ }
 
 
 			// Check if cluster controllable is reachable
@@ -882,7 +887,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					}
 				}
 			}
-			catch (std::runtime_error& e){}
+			catch (std::runtime_error& ){}
 
 			if (fatalRecoveryState){
 				printf("%s", outputString.c_str());
@@ -948,7 +953,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 				if (statusObjConfig.get("log_routers", intVal))
 					outputString += format("\n  Desired Log Routers    - %d", intVal);
 			}
-			catch (std::runtime_error& e) {
+			catch (std::runtime_error& ) {
 				outputString = outputStringCache;
 				outputString += "\n  Unable to retrieve configuration status";
 			}
@@ -959,9 +964,6 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 			StatusObjectReader machinesMap;
 
 			outputStringCache = outputString;
-			// this bool removed code duplication when there's an else (usually due to a missing field) that should print some error message
-			//     which would be the same error message if the catch block was hit
-			bool success = false;
 			try {
 				outputString += "\n  FoundationDB processes - ";
 				if (statusObjCluster.get("processes", processesMap)) {
@@ -1057,7 +1059,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					outputString += "\n  Server time            - " + serverTime;
 				}
 			}
-			catch (std::runtime_error& e){
+			catch (std::runtime_error& ){
 				outputString = outputStringCache;
 				outputString += "\n  Unable to retrieve cluster status";
 			}
@@ -1148,7 +1150,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					outputString += "unknown";
 
 			}
-			catch (std::runtime_error& e) {
+			catch (std::runtime_error& ) {
 				outputString = outputStringCache;
 				outputString += "\n  Unable to retrieve data status";
 			}
@@ -1165,7 +1167,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					operatingSpaceString += format("\n  Log server             - %.1f GB free on most full server", std::max(val / 1e9, 0.0));
 
 			}
-			catch (std::runtime_error& e){
+			catch (std::runtime_error& ){
 				operatingSpaceString = "";
 			}
 
@@ -1202,7 +1204,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 							performanceLimited += format("\n  Most limiting process: %s", procAddr.c_str());
 					}
 				}
-				catch (std::exception &e) {
+				catch (std::exception& ) {
 					// If anything here throws (such as for an incompatible type) ignore it.
 				}
 
@@ -1266,7 +1268,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					}
 				}
 			}
-			catch (std::runtime_error& e){
+			catch (std::runtime_error& ){
 				outputString = outputStringCache;
 				outputString += "\n  Unable to retrieve workload status";
 			}
@@ -1311,7 +1313,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 				outputStringCache = outputString;
 				try {
 					// constructs process performance details output
-					std::map<int, std::string> workerDetails;
+					std::map<NetworkAddress, std::string> workerDetails;
 					for (auto proc : processesMap.obj()){
 						StatusObjectReader procObj(proc.second);
 						std::string address;
@@ -1319,26 +1321,23 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 
 						std::string line;
 
-						// Windows does not support the "hh" width specifier so just using unsigned int to be safe.
-						unsigned int a, b, c, d, port;
-						int tokens = sscanf(address.c_str(), "%u.%u.%u.%u:%u", &a, &b, &c, &d, &port);
-
-						// If did not get exactly 5 tokens, or one of the integers is too large, address is invalid.
-						if (tokens != 5 || a & ~0xFF || b & ~0xFF || c & ~0xFF || d & ~0xFF || port & ~0xFFFF)
-						{
+						NetworkAddress parsedAddress;
+						try {
+							parsedAddress = NetworkAddress::parse(address);
+						} catch (Error& e) {
+							// Groups all invalid IP address/port pair in the end of this detail group.
 							line = format("  %-22s (invalid IP address or port)", address.c_str());
-							std::string &lastline = workerDetails[std::numeric_limits<int>::max()];
+							IPAddress::IPAddressStore maxIp;
+							for (int i = 0; i < maxIp.size(); ++i) {
+								maxIp[i] = std::numeric_limits<std::remove_reference<decltype(maxIp[0])>::type>::max();
+							}
+							std::string& lastline =
+							    workerDetails[NetworkAddress(IPAddress(maxIp), std::numeric_limits<uint16_t>::max())];
 							if (!lastline.empty())
 								lastline.append("\n");
 							lastline += line;
 							continue;
 						}
-
-						// Create addrNum as a 48 bit number {A}{B}{C}{D}{PORT}
-						uint64_t addrNum = 0;
-						for (auto i : { a, b, c, d })
-							addrNum = (addrNum << 8) | i;
-						addrNum = (addrNum << 16) | port;
 
 						try {
 							double tx = -1, rx = -1, mCPUUtil = -1;
@@ -1401,18 +1400,18 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 								}
 							}
 
-							workerDetails[addrNum] = line;
+							workerDetails[parsedAddress] = line;
 						}
 
-						catch (std::runtime_error& e) {
+						catch (std::runtime_error& ) {
 							std::string noMetrics = format("  %-22s (no metrics available)", address.c_str());
-							workerDetails[addrNum] = noMetrics;
+							workerDetails[parsedAddress] = noMetrics;
 						}
 					}
 					for (auto w : workerDetails)
 						outputString += "\n" + format("%s", w.second.c_str());
 				}
-				catch (std::runtime_error& e){
+				catch (std::runtime_error& ){
 					outputString = outputStringCache;
 					outputString += "\n  Unable to retrieve process performance details";
 				}
@@ -1469,7 +1468,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 							printf("The database is available, but has issues (type 'status' for more information).\n");
 						}
 					}
-					catch (std::runtime_error& e){
+					catch (std::runtime_error& ){
 						printf("The database is available, but has issues (type 'status' for more information).\n");
 					}
 				}
@@ -1479,7 +1478,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 					printf("WARNING: The cluster file is not up to date. Type 'status' for more information.\n");
 				}
 			}
-			catch (std::runtime_error& e){
+			catch (std::runtime_error& ){
 				printf("Unable to determine database state, type 'status' for more information.\n");
 			}
 
@@ -1490,7 +1489,7 @@ void printStatus(StatusObjectReader statusObj, StatusClient::StatusLevel level, 
 			printf("%s\n", json_spirit::write_string(json_spirit::mValue(statusObj.obj()), json_spirit::Output_options::pretty_print).c_str());
 		}
 	}
-	catch (Error &e){
+	catch (Error& ){
 		if (hideErrorMessages)
 			return;
 		if (level == StatusClient::MINIMAL) {
@@ -2290,7 +2289,7 @@ void fdbcli_comp_cmd(std::string const& text, std::vector<std::string>& lc) {
 
 void LogCommand(std::string line, UID randomID, std::string errMsg) {
 	printf("%s\n", errMsg.c_str());
-	TraceEvent(SevInfo, "CLICommandLog", randomID).detail("Command", printable(StringRef(line))).detail("Error", printable(StringRef(errMsg)));
+	TraceEvent(SevInfo, "CLICommandLog", randomID).detail("Command", line).detail("Error", errMsg);
 }
 
 struct CLIOptions {
@@ -2302,6 +2301,7 @@ struct CLIOptions {
 	std::string clusterFile;
 	bool trace;
 	std::string traceDir;
+	std::string traceFormat;
 	int exit_timeout;
 	Optional<std::string> exec;
 	bool initialStatusCheck;
@@ -2398,9 +2398,10 @@ struct CLIOptions {
 			case OPT_STATUS_FROM_JSON:
 				return printStatusFromJSON(args.OptionArg());
 			case OPT_TRACE_FORMAT:
-				if (!selectTraceFormatter(args.OptionArg())) {
+				if (!validateTraceFormat(args.OptionArg())) {
 					fprintf(stderr, "WARNING: Unrecognized trace format `%s'\n", args.OptionArg());
 				}
+				traceFormat = args.OptionArg();
 				break;
 			case OPT_VERSION:
 				printVersion();
@@ -2519,7 +2520,7 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 
 		try {
 			state UID randomID = g_random->randomUniqueID();
-			TraceEvent(SevInfo, "CLICommandLog", randomID).detail("Command", printable(StringRef(line)));
+			TraceEvent(SevInfo, "CLICommandLog", randomID).detail("Command", line);
 
 			bool malformed, partial;
 			state std::vector<std::vector<StringRef>> parsed = parseLine(line, malformed, partial);
@@ -2849,9 +2850,33 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 					continue;
 				}
 
+				if (tokencmp(tokens[0], "maintenance")) {
+					if (tokens.size() == 1) {
+						wait( makeInterruptable( printHealthyZone(db) ) );
+					}
+					else if (tokens.size() == 2 && tokencmp(tokens[1], "off")) {
+						wait( makeInterruptable( clearHealthyZone(db) ) );
+					}
+					else if (tokens.size() == 4 && tokencmp(tokens[1], "on")) {
+						double seconds;
+						int n=0;
+						auto secondsStr = tokens[3].toString();
+						if (sscanf(secondsStr.c_str(), "%lf%n", &seconds, &n) != 1 || n != secondsStr.size()) {
+							printUsage(tokens[0]);
+							is_error = true;
+						} else {
+							wait( makeInterruptable( setHealthyZone( db, tokens[2], seconds ) ) );
+						}
+					} else {
+						printUsage(tokens[0]);
+						is_error = true;
+					}
+					continue;
+				}
+
 				if (tokencmp(tokens[0], "profile")) {
 					if (tokens.size() == 1) {
-						printf("ERROR: Usage: profile <client|list|flow>\n");
+						printf("ERROR: Usage: profile <client|list|flow|heap>\n");
 						is_error = true;
 						continue;
 					}
@@ -2980,10 +3005,7 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 							}
 							if (tokens.size() == 6 && tokencmp(tokens[5], "all")) {
 								for (const auto& pair : interfaces) {
-									ProfilerRequest profileRequest;
-									profileRequest.type = ProfilerRequest::Type::FLOW;
-									profileRequest.action = ProfilerRequest::Action::RUN;
-									profileRequest.duration = duration;
+									ProfilerRequest profileRequest(ProfilerRequest::Type::FLOW, ProfilerRequest::Action::RUN, duration);
 									profileRequest.outputFile = tokens[4];
 									all_profiler_addresses.push_back(pair.first);
 									all_profiler_responses.push_back(pair.second.profiler.tryGetReply(profileRequest));
@@ -2998,10 +3020,7 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 								}
 								if (!is_error) {
 									for (int tokenidx = 5; tokenidx < tokens.size(); tokenidx++) {
-										ProfilerRequest profileRequest;
-										profileRequest.type = ProfilerRequest::Type::FLOW;
-										profileRequest.action = ProfilerRequest::Action::RUN;
-										profileRequest.duration = duration;
+										ProfilerRequest profileRequest(ProfilerRequest::Type::FLOW, ProfilerRequest::Action::RUN, duration);
 										profileRequest.outputFile = tokens[4];
 										all_profiler_addresses.push_back(tokens[tokenidx]);
 										all_profiler_responses.push_back(interfaces[tokens[tokenidx]].profiler.tryGetReply(profileRequest));
@@ -3021,6 +3040,36 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 							all_profiler_responses.clear();
 							continue;
 						}
+					}
+					if (tokencmp(tokens[1], "heap")) {
+						if (tokens.size() != 3) {
+							printf("ERROR: Usage: profile heap host\n");
+							is_error = true;
+							continue;
+						}
+						getTransaction(db, tr, options, intrans);
+						Standalone<RangeResultRef> kvs = wait(makeInterruptable(
+								tr->getRange(KeyRangeRef(LiteralStringRef("\xff\xff/worker_interfaces"),
+																					LiteralStringRef("\xff\xff\xff")),
+															1)));
+						std::map<Key, ClientWorkerInterface> interfaces;
+						for (const auto& pair : kvs) {
+							auto ip_port = pair.key.endsWith(LiteralStringRef(":tls")) ? pair.key.removeSuffix(LiteralStringRef(":tls")) : pair.key;
+							interfaces.emplace(ip_port, BinaryReader::fromStringRef<ClientWorkerInterface>(pair.value, IncludeVersion()));
+						}
+						state Key ip_port = tokens[2];
+						if (interfaces.find(ip_port) == interfaces.end()) {
+							printf("ERROR: host %s not found\n", printable(ip_port).c_str());
+							is_error = true;
+							continue;
+						}
+						ProfilerRequest profileRequest(ProfilerRequest::Type::GPROF_HEAP, ProfilerRequest::Action::RUN, 0);
+						profileRequest.outputFile = LiteralStringRef("heapz");
+						ErrorOr<Void> response = wait(interfaces[ip_port].profiler.tryGetReply(profileRequest));
+						if (response.isError()) {
+							printf("ERROR: %s: %s: %s\n", printable(ip_port).c_str(), response.getError().name(), response.getError().what());
+						}
+						continue;
 					}
 					printf("ERROR: Unknown type: %s\n", printable(tokens[1]).c_str());
 					is_error = true;
@@ -3293,7 +3342,7 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 						}
 						catch(Error &e) {
 							//options->setOption() prints error message
-							TraceEvent(SevWarn, "CLISetOptionError").error(e).detail("Option", printable(tokens[2]));
+							TraceEvent(SevWarn, "CLISetOptionError").error(e).detail("Option", tokens[2]);
 							is_error = true;
 						}
 					}
@@ -3305,7 +3354,7 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 				is_error = true;
 			}
 
-			TraceEvent(SevInfo, "CLICommandLog", randomID).detail("Command", printable(StringRef(line))).detail("IsError", is_error);
+			TraceEvent(SevInfo, "CLICommandLog", randomID).detail("Command", line).detail("IsError", is_error);
 
 		} catch (Error& e) {
 			if(e.code() != error_code_actor_cancelled)
@@ -3395,6 +3444,9 @@ int main(int argc, char **argv) {
 		else
 			setNetworkOption(FDBNetworkOptions::TRACE_ENABLE, StringRef(opt.traceDir));
 
+		if (!opt.traceFormat.empty()) {
+			setNetworkOption(FDBNetworkOptions::TRACE_FORMAT, StringRef(opt.traceFormat));
+		}
 		setNetworkOption(FDBNetworkOptions::ENABLE_SLOW_TASK_PROFILING);
 	}
 

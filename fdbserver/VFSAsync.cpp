@@ -57,8 +57,6 @@
 #define PENDING_LOCK    3
 #define EXCLUSIVE_LOCK  4
 const uint32_t RESERVED_COUNT = 1U<<29;
-const uint32_t PENDING_COUNT = 1U<<30;
-const uint32_t EXCLUSIVE_COUNT = 1U<<31;
 
 /*
 ** When using this VFS, the sqlite3_file* handles that SQLite uses are
@@ -112,7 +110,7 @@ static int asyncRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite_int64 iOf
 			return SQLITE_IOERR_SHORT_READ;
 		}
 		return SQLITE_OK;
-	} catch (Error& e) {
+	} catch (Error& ) {
 		return SQLITE_IOERR_READ;
 	}
 }
@@ -123,7 +121,7 @@ static int asyncReleaseZeroCopy(sqlite3_file* pFile, void* data, int iAmt, sqlit
 	try{
 		--p->debug_zcrefs;
 		p->file->releaseZeroCopy( data, iAmt, iOfst );
-	} catch (Error& e) {
+	} catch (Error& ) {
 		return SQLITE_IOERR;
 	}
 	return SQLITE_OK;
@@ -145,7 +143,7 @@ static int asyncReadZeroCopy(sqlite3_file *pFile, void **data, int iAmt, sqlite_
 		}
 		++p->debug_zcreads;
 		return SQLITE_OK;
-	} catch (Error& e) {
+	} catch (Error& ) {
 		return SQLITE_IOERR_READ;
 	}
 }
@@ -162,7 +160,7 @@ static int asyncReadZeroCopy(sqlite3_file *pFile, void **data, int iAmt, sqlite_
 			return SQLITE_IOERR_SHORT_READ;
 		}
 		return SQLITE_OK;
-	} catch (Error& e) {
+	} catch (Error& ) {
 		return SQLITE_IOERR_READ;
 	}
 }
@@ -178,7 +176,7 @@ static int asyncWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite_in
 	try {
 		waitFor( p->file->write( zBuf, iAmt, iOfst ) );
 		return SQLITE_OK;
-	} catch(Error& e) {
+	} catch(Error& ) {
 		return SQLITE_IOERR_WRITE;
 	}
 }
@@ -188,7 +186,7 @@ static int asyncTruncate(sqlite3_file *pFile, sqlite_int64 size){
 	try {
 		waitFor( p->file->truncate( size ) );
 		return SQLITE_OK;
-	} catch(Error& e) {
+	} catch(Error& ) {
 		return SQLITE_IOERR_TRUNCATE;
 	}
 }
@@ -217,20 +215,19 @@ static int VFSAsyncFileSize(sqlite3_file *pFile, sqlite_int64 *pSize){
 	try {
 		*pSize = waitForAndGet( p->file->size() );
 		return SQLITE_OK;
-	} catch (Error& e) {
+	} catch (Error& ) {
 		return SQLITE_IOERR_FSTAT;
 	}
 }
 
 static int asyncLock(sqlite3_file *pFile, int eLock){
-	VFSAsyncFile *p = (VFSAsyncFile*)pFile;
+	//VFSAsyncFile *p = (VFSAsyncFile*)pFile;
 
 	//TraceEvent("FileLock").detail("File", p->filename).detail("Fd", p->file->debugFD()).detail("PrevLockLevel", p->lockLevel).detail("Op", eLock).detail("LockCount", *p->pLockCount);
 
 	return eLock == EXCLUSIVE_LOCK ? SQLITE_BUSY : SQLITE_OK;
 }
 static int asyncUnlock(sqlite3_file *pFile, int eLock) {
-	VFSAsyncFile *p = (VFSAsyncFile*)pFile;
 	assert( eLock <= SHARED_LOCK );
 
 	return SQLITE_OK;
@@ -645,7 +642,7 @@ static int asyncFullPathname(
 ** and false otherwise.
 */
 bool vfsAsyncIsOpen( std::string filename ) {
-	return SharedMemoryInfo::table.count( abspath(filename) );
+	return SharedMemoryInfo::table.count( abspath(filename) ) > 0;
 }
 
 /*

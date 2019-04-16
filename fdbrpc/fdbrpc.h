@@ -150,15 +150,15 @@ private:
 
 template <class Ar, class T>
 void save(Ar& ar, const ReplyPromise<T>& value) {
-	auto const& ep = value.getEndpoint();
+	auto const& ep = value.getEndpoint().token;
 	ar << ep;
-	ASSERT(!ep.getPrimaryAddress().isValid() || ep.getPrimaryAddress().isPublic()); // No re-serializing non-public addresses (the reply connection won't be available to any other process)
 }
 
 template <class Ar, class T>
 void load(Ar& ar, ReplyPromise<T>& value) {
-	Endpoint endpoint;
-	FlowTransport::transport().loadEndpoint(ar, endpoint);
+	UID token;
+	ar >> token;
+	Endpoint endpoint = FlowTransport::transport().loadedEndpoint(token);
 	value = ReplyPromise<T>(endpoint);
 	networkSender(value.getFuture(), endpoint);
 }
@@ -310,12 +310,23 @@ public:
 	//   See IFailureMonitor::onFailedFor() for an explanation of the duration and slope parameters.
 	template <class X>
 	Future<ErrorOr<REPLY_TYPE(X)>> getReplyUnlessFailedFor(const X& value, double sustainedFailureDuration, double sustainedFailureSlope, int taskID) const {
-		return waitValueOrSignal(getReply(value, taskID), makeDependent<T>(IFailureMonitor::failureMonitor()).onFailedFor(getEndpoint(taskID), sustainedFailureDuration, sustainedFailureSlope), getEndpoint(taskID));
+		// If it is local endpoint, no need for failure monitoring
+		return waitValueOrSignal(getReply(value, taskID),
+				makeDependent<T>(IFailureMonitor::failureMonitor()).onFailedFor(getEndpoint(taskID), sustainedFailureDuration, sustainedFailureSlope),
+				getEndpoint(taskID));
 	}
 
 	template <class X>
 	Future<ErrorOr<REPLY_TYPE(X)>> getReplyUnlessFailedFor(const X& value, double sustainedFailureDuration, double sustainedFailureSlope) const {
-		return waitValueOrSignal(getReply(value), makeDependent<T>(IFailureMonitor::failureMonitor()).onFailedFor(getEndpoint(), sustainedFailureDuration, sustainedFailureSlope), getEndpoint());
+		// If it is local endpoint, no need for failure monitoring
+		return waitValueOrSignal(getReply(value),
+				makeDependent<T>(IFailureMonitor::failureMonitor()).onFailedFor(getEndpoint(), sustainedFailureDuration, sustainedFailureSlope),
+				getEndpoint());
+	}
+
+	template <class X>
+	Future<ErrorOr<X>> getReplyUnlessFailedFor(double sustainedFailureDuration, double sustainedFailureSlope) const {
+		return getReplyUnlessFailedFor(ReplyPromise<X>(), sustainedFailureDuration, sustainedFailureSlope);
 	}
 
 	explicit RequestStream(const Endpoint& endpoint) : queue(new NetNotifiedQueue<T>(0, 1, endpoint)) {}
@@ -364,7 +375,7 @@ void save(Ar& ar, const RequestStream<T>& value) {
 template <class Ar, class T>
 void load(Ar& ar, RequestStream<T>& value) {
 	Endpoint endpoint;
-	FlowTransport::transport().loadEndpoint(ar, endpoint);
+	ar >> endpoint;
 	value = RequestStream<T>(endpoint);
 }
 

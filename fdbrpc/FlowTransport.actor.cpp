@@ -28,6 +28,7 @@
 #include "fdbrpc/FailureMonitor.h"
 #include "fdbrpc/crc32c.h"
 #include "fdbrpc/simulator.h"
+#include <unordered_map>
 
 #if VALGRIND
 #include <memcheck.h>
@@ -148,7 +149,9 @@ public:
 		lastIncompatibleMessage(0),
 		transportId(transportId),
 		numIncompatibleConnections(0)
-	{}
+	{
+		degraded = Reference<AsyncVar<bool>>( new AsyncVar<bool>(false) );
+	}
 
 	~TransportData();
 
@@ -168,7 +171,9 @@ public:
 
 	NetworkAddressList localAddresses;
 	std::vector<Future<Void>> listeners;
-	std::map<NetworkAddress, struct Peer*> peers;
+	std::unordered_map<NetworkAddress, struct Peer*> peers;
+	std::unordered_map<NetworkAddress, std::pair<double, double>> closedPeers;
+	Reference<AsyncVar<bool>> degraded;
 	bool warnAlwaysForLargePacket;
 
 	// These declarations must be in exactly this order
@@ -480,6 +485,17 @@ struct Peer : NonCopyable {
 				}
 				else {
 					TraceEvent(ok ? SevInfo : SevWarnAlways, "IncompatibleConnectionClosed", conn ? conn->getDebugID() : UID()).error(e, true).suppressFor(1.0).detail("PeerAddr", self->destination);
+				}
+
+				if(self->destination.isPublic() && IFailureMonitor::failureMonitor().getState(self->destination).isAvailable()) {
+					auto& it = self->transport->closedPeers[self->destination];
+					if(now() - it.second > FLOW_KNOBS->TOO_MANY_CONNECTIONS_CLOSED_RESET_DELAY) {
+						it.first = now();
+					} else if(now() - it.first > FLOW_KNOBS->TOO_MANY_CONNECTIONS_CLOSED_TIMEOUT) {
+						TraceEvent(SevWarnAlways, "TooManyConnectionsClosed", conn ? conn->getDebugID() : UID()).suppressFor(5.0).detail("PeerAddr", self->destination);
+						self->transport->degraded->set(true);
+					}
+					it.second = now();
 				}
 
 				if (conn) {
@@ -913,11 +929,8 @@ Future<Void> FlowTransport::bind( NetworkAddress publicAddress, NetworkAddress l
 	return listenF;
 }
 
-void FlowTransport::loadedEndpoint( Endpoint& endpoint ) {
-	if (endpoint.getPrimaryAddress().isValid()) return;
-	ASSERT( !(endpoint.token.first() & TOKEN_STREAM_FLAG) );  // Only reply promises are supposed to be unaddressed
-	ASSERT( g_currentDeliveryPeerAddress.address.isValid() );
-	endpoint.addresses = g_currentDeliveryPeerAddress;
+Endpoint FlowTransport::loadedEndpoint( const UID& token ) {
+	return Endpoint(g_currentDeliveryPeerAddress, token);
 }
 
 void FlowTransport::addPeerReference( const Endpoint& endpoint, NetworkMessageReceiver* receiver ) {
@@ -978,7 +991,7 @@ static PacketID sendPacket( TransportData* self, ISerializeSource const& what, c
 
 		BinaryWriter wr( AssumeVersion(currentProtocolVersion) );
 		what.serializeBinaryWriter(wr);
-		Standalone<StringRef> copy = wr.toStringRef();
+		Standalone<StringRef> copy = wr.toValue();
 #if VALGRIND
 		VALGRIND_CHECK_MEM_IS_DEFINED(copy.begin(), copy.size());
 #endif
@@ -1007,7 +1020,6 @@ static PacketID sendPacket( TransportData* self, ISerializeSource const& what, c
 		PacketBuffer* pb = peer->unsent.getWriteBuffer();
 		ReliablePacket* rp = reliable ? new ReliablePacket : 0;
 
-		void*p = pb->data+pb->bytes_written;
 		int prevBytesWritten = pb->bytes_written;
 		PacketBuffer* checksumPb = pb;
 
@@ -1100,6 +1112,10 @@ void FlowTransport::sendUnreliable( ISerializeSource const& what, const Endpoint
 
 int FlowTransport::getEndpointCount() {
 	return -1;
+}
+
+Reference<AsyncVar<bool>> FlowTransport::getDegraded() {
+	return self->degraded;
 }
 
 bool FlowTransport::incompatibleOutgoingConnectionsPresent() {

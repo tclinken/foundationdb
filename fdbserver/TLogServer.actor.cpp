@@ -213,7 +213,7 @@ static Key persistTagMessagesKey( UID id, Tag tag, Version version ) {
 	wr << id;
 	wr << tag;
 	wr << bigEndian64( version );
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 static Key persistTagMessageRefsKey( UID id, Tag tag, Version version ) {
@@ -222,7 +222,7 @@ static Key persistTagMessageRefsKey( UID id, Tag tag, Version version ) {
 	wr << id;
 	wr << tag;
 	wr << bigEndian64( version );
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 static Key persistTagPoppedKey( UID id, Tag tag ) {
@@ -230,7 +230,7 @@ static Key persistTagPoppedKey( UID id, Tag tag ) {
 	wr.serializeBytes( persistTagPoppedKeys.begin );
 	wr << id;
 	wr << tag;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 static Value persistTagPoppedValue( Version popped ) {
@@ -258,10 +258,6 @@ static StringRef stripTagMessageRefsKey( StringRef key ) {
 
 static Version decodeTagMessagesKey( StringRef key ) {
 	return bigEndian64( BinaryReader::fromStringRef<Version>( stripTagMessagesKey(key), Unversioned() ) );
-}
-
-static Version decodeTagMessageRefsKey( StringRef key ) {
-	return bigEndian64( BinaryReader::fromStringRef<Version>( stripTagMessageRefsKey(key), Unversioned() ) );
 }
 
 struct SpilledData {
@@ -549,7 +545,7 @@ void TLogQueue::push( T const& qe, Reference<LogData> logData ) {
 	*(uint32_t*)wr.getData() = wr.getLength() - sizeof(uint32_t) - sizeof(uint8_t);
 	const IDiskQueue::location startloc = queue->getNextPushLocation();
 	// FIXME: push shouldn't return anything.  We should call getNextPushLocation() again.
-	const IDiskQueue::location endloc = queue->push( wr.toStringRef() );
+	const IDiskQueue::location endloc = queue->push( wr.toValue() );
 	//TraceEvent("TLogQueueVersionWritten", dbgid).detail("Size", wr.getLength() - sizeof(uint32_t) - sizeof(uint8_t)).detail("Loc", loc);
 	logData->versionLocation[qe.version] = std::make_pair(startloc, endloc);
 }
@@ -770,7 +766,7 @@ ACTOR Future<Void> updatePersistentData( TLogData* self, Reference<LogData> logD
 						for(; msg != tagData->versionMessages.end() && msg->first == currentVersion; ++msg) {
 							wr << msg->second.toStringRef();
 						}
-						self->persistentData->set( KeyValueRef( persistTagMessagesKey( logData->logId, tagData->tag, currentVersion ), wr.toStringRef() ) );
+						self->persistentData->set( KeyValueRef( persistTagMessagesKey( logData->logId, tagData->tag, currentVersion ), wr.toValue() ) );
 					} else {
 						// spill everything else by reference
 						const IDiskQueue::location begin = logData->versionLocation[currentVersion].first;
@@ -800,7 +796,7 @@ ACTOR Future<Void> updatePersistentData( TLogData* self, Reference<LogData> logD
 				}
 				if (refSpilledTagCount > 0) {
 					*(uint32_t*)wr.getData() = refSpilledTagCount;
-					self->persistentData->set( KeyValueRef( persistTagMessageRefsKey( logData->logId, tagData->tag, lastVersion ), wr.toStringRef() ) );
+					self->persistentData->set( KeyValueRef( persistTagMessageRefsKey( logData->logId, tagData->tag, lastVersion ), wr.toValue() ) );
 					tagData->poppedLocation = std::min(tagData->poppedLocation, firstLocation);
 				}
 
@@ -1157,7 +1153,7 @@ void peekMessagesFromMemory( Reference<LogData> self, TLogPeekRequest const& req
 	ASSERT( !messages.getLength() );
 
 	auto& deque = getVersionMessages(self, req.tag);
-	//TraceEvent("TLogPeekMem", self->dbgid).detail("Tag", printable(req.tag1)).detail("PDS", self->persistentDataSequence).detail("PDDS", self->persistentDataDurableSequence).detail("Oldest", map1.empty() ? 0 : map1.begin()->key ).detail("OldestMsgCount", map1.empty() ? 0 : map1.begin()->value.size());
+	//TraceEvent("TLogPeekMem", self->dbgid).detail("Tag", req.tag1).detail("PDS", self->persistentDataSequence).detail("PDDS", self->persistentDataDurableSequence).detail("Oldest", map1.empty() ? 0 : map1.begin()->key ).detail("OldestMsgCount", map1.empty() ? 0 : map1.begin()->value.size());
 
 	Version begin = std::max( req.begin, self->persistentDataDurableVersion+1 );
 	auto it = std::lower_bound(deque.begin(), deque.end(), std::make_pair(begin, LengthPrefixedStringRef()), CompareFirst<std::pair<Version, LengthPrefixedStringRef>>());
@@ -1260,7 +1256,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 		return Void();
 	}
 
-	//TraceEvent("TLogPeekMessages0", self->dbgid).detail("ReqBeginEpoch", req.begin.epoch).detail("ReqBeginSeq", req.begin.sequence).detail("Epoch", self->epoch()).detail("PersistentDataSeq", self->persistentDataSequence).detail("Tag1", printable(req.tag1)).detail("Tag2", printable(req.tag2));
+	//TraceEvent("TLogPeekMessages0", self->dbgid).detail("ReqBeginEpoch", req.begin.epoch).detail("ReqBeginSeq", req.begin.sequence).detail("Epoch", self->epoch()).detail("PersistentDataSeq", self->persistentDataSequence).detail("Tag1", req.tag1).detail("Tag2", req.tag2);
 	// Wait until we have something to return that the caller doesn't already have
 	if( logData->version.get() < req.begin ) {
 		wait( logData->version.whenAtLeast( req.begin ) );
@@ -1308,7 +1304,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 	state Version endVersion = logData->version.get() + 1;
 
 	//grab messages from disk
-	//TraceEvent("TLogPeekMessages", self->dbgid).detail("ReqBeginEpoch", req.begin.epoch).detail("ReqBeginSeq", req.begin.sequence).detail("Epoch", self->epoch()).detail("PersistentDataSeq", self->persistentDataSequence).detail("Tag1", printable(req.tag1)).detail("Tag2", printable(req.tag2));
+	//TraceEvent("TLogPeekMessages", self->dbgid).detail("ReqBeginEpoch", req.begin.epoch).detail("ReqBeginSeq", req.begin.sequence).detail("Epoch", self->epoch()).detail("PersistentDataSeq", self->persistentDataSequence).detail("Tag1", req.tag1).detail("Tag2", req.tag2);
 	if( req.begin <= logData->persistentDataDurableVersion ) {
 		// Just in case the durable version changes while we are waiting for the read, we grab this data from memory.  We may or may not actually send it depending on
 		// whether we get enough data from disk.
@@ -1332,7 +1328,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 			if (kvs.expectedSize() >= SERVER_KNOBS->DESIRED_TOTAL_BYTES)
 				endVersion = decodeTagMessagesKey(kvs.end()[-1].key) + 1;
 			else
-				messages.serializeBytes( messages2.toStringRef() );
+				messages.serializeBytes( messages2.toValue() );
 		} else {
 			// Calculating checksums of read pages is potentially expensive, and storage servers with
 			// spilled data are likely behind and not contributing usefully to the cluster anyway.
@@ -1345,7 +1341,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 							persistTagMessageRefsKey(logData->logId, req.tag, req.begin),
 							persistTagMessageRefsKey(logData->logId, req.tag, logData->persistentDataDurableVersion + 1))));
 
-			//TraceEvent("TLogPeekResults", self->dbgid).detail("ForAddress", req.reply.getEndpoint().getPrimaryAddress()).detail("Tag1Results", s1).detail("Tag2Results", s2).detail("Tag1ResultsLim", kv1.size()).detail("Tag2ResultsLim", kv2.size()).detail("Tag1ResultsLast", kv1.size() ? printable(kv1[0].key) : "").detail("Tag2ResultsLast", kv2.size() ? printable(kv2[0].key) : "").detail("Limited", limited).detail("NextEpoch", next_pos.epoch).detail("NextSeq", next_pos.sequence).detail("NowEpoch", self->epoch()).detail("NowSeq", self->sequence.getNextSequence());
+			//TraceEvent("TLogPeekResults", self->dbgid).detail("ForAddress", req.reply.getEndpoint().getPrimaryAddress()).detail("Tag1Results", s1).detail("Tag2Results", s2).detail("Tag1ResultsLim", kv1.size()).detail("Tag2ResultsLim", kv2.size()).detail("Tag1ResultsLast", kv1.size() ? kv1[0].key : "").detail("Tag2ResultsLast", kv2.size() ? kv2[0].key : "").detail("Limited", limited).detail("NextEpoch", next_pos.epoch).detail("NextSeq", next_pos.sequence).detail("NowEpoch", self->epoch()).detail("NowSeq", self->sequence.getNextSequence());
 
 			state std::vector<std::pair<IDiskQueue::location, IDiskQueue::location>> commitLocations;
 			state bool earlyEnd = false;
@@ -1414,7 +1410,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 			if (earlyEnd)
 				endVersion = lastRefMessageVersion + 1;
 			else
-				messages.serializeBytes( messages2.toStringRef() );
+				messages.serializeBytes( messages2.toValue() );
 		}
 	} else {
 		peekMessagesFromMemory( logData, req, messages, endVersion );
@@ -1424,7 +1420,7 @@ ACTOR Future<Void> tLogPeekMessages( TLogData* self, TLogPeekRequest req, Refere
 	TLogPeekReply reply;
 	reply.maxKnownVersion = logData->version.get();
 	reply.minKnownCommittedVersion = logData->minKnownCommittedVersion;
-	reply.messages = messages.toStringRef();
+	reply.messages = messages.toValue();
 	reply.end = endVersion;
 
 	//TraceEvent("TlogPeek", self->dbgid).detail("LogId", logData->logId).detail("EndVer", reply.end).detail("MsgBytes", reply.messages.expectedSize()).detail("ForAddress", req.reply.getEndpoint().getPrimaryAddress());
@@ -1466,7 +1462,7 @@ ACTOR Future<Void> watchDegraded(TLogData* self) {
 	return Void();
 }
 
-ACTOR Future<Void> doQueueCommit( TLogData* self, Reference<LogData> logData ) {
+ACTOR Future<Void> doQueueCommit( TLogData* self, Reference<LogData> logData, std::vector<Reference<LogData>> missingFinalCommit ) {
 	state Version ver = logData->version.get();
 	state Version commitNumber = self->queueCommitBegin+1;
 	state Version knownCommittedVersion = logData->knownCommittedVersion;
@@ -1507,6 +1503,11 @@ ACTOR Future<Void> doQueueCommit( TLogData* self, Reference<LogData> logData ) {
 	logData->queueCommittedVersion.set(ver);
 	self->queueCommitEnd.set(commitNumber);
 
+	for(auto& it : missingFinalCommit) {
+		TraceEvent("TLogCommitMissingFinalCommit", self->dbgid).detail("LogId", logData->logId).detail("Version", it->version.get()).detail("QueueVer", it->queueCommittedVersion.get());
+		TEST(true); //A TLog was replaced before having a chance to commit its queue
+		it->queueCommittedVersion.set(it->version.get());
+	}
 	return Void();
 }
 
@@ -1515,10 +1516,13 @@ ACTOR Future<Void> commitQueue( TLogData* self ) {
 
 	loop {
 		int foundCount = 0;
+		state std::vector<Reference<LogData>> missingFinalCommit;
 		for(auto it : self->id_data) {
 			if(!it.second->stopped) {
 				 logData = it.second;
 				 foundCount++;
+			} else if(it.second->version.get() > std::max(it.second->queueCommittingVersion, it.second->queueCommittedVersion.get())) {
+				missingFinalCommit.push_back(it.second);
 			}
 		}
 
@@ -1544,7 +1548,8 @@ ACTOR Future<Void> commitQueue( TLogData* self ) {
 					while( self->queueCommitBegin != self->queueCommitEnd.get() && !self->largeDiskQueueCommitBytes.get() ) {
 						wait( self->queueCommitEnd.whenAtLeast(self->queueCommitBegin) || self->largeDiskQueueCommitBytes.onChange() );
 					}
-					self->sharedActors.send(doQueueCommit(self, logData));
+					self->sharedActors.send(doQueueCommit(self, logData, missingFinalCommit));
+					missingFinalCommit.clear();
 				}
 				when(wait(self->newLogData.onTrigger())) {}
 			}
@@ -2078,7 +2083,7 @@ ACTOR Future<Void> restorePersistentState( TLogData* self, LocalityData locality
 			flushAndExit(0);
 		}
 
-		TraceEvent(SevError, "UnsupportedDBFormat", self->dbgid).detail("Format", printable(fFormat.get().get())).detail("Expected", persistFormat.value.toString());
+		TraceEvent(SevError, "UnsupportedDBFormat", self->dbgid).detail("Format", fFormat.get().get()).detail("Expected", persistFormat.value.toString());
 		throw worker_recovery_failed();
 	}
 
@@ -2089,7 +2094,7 @@ ACTOR Future<Void> restorePersistentState( TLogData* self, LocalityData locality
 			throw worker_removed();
 		} else {
 			// This should never happen
-			TraceEvent(SevError, "NoDBFormatKey", self->dbgid).detail("FirstKey", printable(v[0].key));
+			TraceEvent(SevError, "NoDBFormatKey", self->dbgid).detail("FirstKey", v[0].key);
 			ASSERT( false );
 			throw worker_recovery_failed();
 		}
