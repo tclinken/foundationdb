@@ -32,7 +32,7 @@ stage("Build") {
             |git config --global user.name jenkins
             |git config --global user.email fdb-devs@snowflake.net
             |cd snowflake/jenkins
-            |./build.sh check_uploaded package upload
+            |./build.sh check_uploaded package sql sql_upload upload
           """.stripMargin()
     }
 }
