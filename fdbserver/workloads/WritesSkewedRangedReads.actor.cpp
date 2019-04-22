@@ -1,9 +1,9 @@
 #include "flow/actorcompiler.h"
 #include "flow/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/WorkerInterface.h"
-#include "workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/WorkerInterface.actor.h"
+#include "workloads.actor.h"
 #include "BulkSetup.actor.h"
 #include "fdbserver/ClusterRecruitmentInterface.h"
 #include "fdbclient/ReadYourWrites.h"
@@ -289,14 +289,14 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
         try {
             loop
             {
-	        ErrorOr<vector<std::pair<WorkerInterface, ProcessClass>>> workerList =
+	        ErrorOr<vector<WorkerDetails>> workerList =
                     wait(db->get().clusterInterface.getWorkers.tryGetReply(
                         GetWorkersRequest()));
                 if (workerList.present()) {
                     std::vector<Future<ErrorOr<Void>>> dumpRequests;
                     for (int i = 0; i < workerList.get().size(); i++)
                         dumpRequests.push_back(
-                            workerList.get()[i].first.traceBatchDumpRequest.tryGetReply(
+                            workerList.get()[i].interf.traceBatchDumpRequest.tryGetReply(
                                     TraceBatchDumpRequest()));
                     wait(waitForAll(dumpRequests));
                     return true;
