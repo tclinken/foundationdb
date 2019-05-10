@@ -20,6 +20,7 @@
 
 
 #define SQLITE_THREADSAFE 0  // also in sqlite3.amalgamation.c!
+#include "fdbrpc/crc32c.h"
 #include "fdbserver/IKeyValueStore.h"
 #include "fdbserver/CoroFlow.h"
 #include "fdbserver/Knobs.h"
@@ -85,7 +86,7 @@ struct PageChecksumCodec {
 	// If write is true then the checksum is written into the page and true is returned.
 	// If write is false then the checksum is compared to the in-page sum and the return value
 	// is whether or not the checksums were equal.
-	bool checksum(Pgno pageNumber, void *data, int pageLen, bool write) {
+	bool checksum_hashlittle2(Pgno pageNumber, void* data, int pageLen, bool write) {
 		ASSERT(pageLen > sizeof(SumType));
 
 		char *pData = (char *)data;
@@ -116,6 +117,26 @@ struct PageChecksumCodec {
 		}
 
 		return true;
+	}
+
+	bool checksum_crc32c(Pgno pageNumber, void* data, int pageLen, bool write) {
+		ASSERT(pageLen > sizeof(uint32_t));
+		char* pData = (char*)data;
+		int dataLen = pageLen - sizeof(uint32_t);
+		uint32_t* pSumInPage = (uint32_t*)(pData + dataLen);
+		uint32_t sum = crc32c_append(0xfdbeefdb, static_cast<uint8_t*>(data), dataLen);
+
+		if (write) {
+			memcpy(pSumInPage, &sum, sizeof(uint32_t));
+			return true;
+		}
+		return sum == *pSumInPage;
+	}
+
+	bool checksum(Pgno pageNumber, void* data, int pageLen, bool write) {
+		// first attempt to use crc32c but fall back to hashlittle2 for legacy reasons
+		return checksum_crc32c(pageNumber, data, pageLen, write) ||
+		       checksum_hashlittle2(pageNumber, data, pageLen, write);
 	}
 
 	static void * codec(void *vpSelf, void *data, Pgno pageNumber, int op) {
