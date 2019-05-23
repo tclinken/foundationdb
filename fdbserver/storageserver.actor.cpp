@@ -613,10 +613,10 @@ public:
 	}
 
 	double getPenalty() {
-		return std::max(std::min(1.0, (queueSize() - (SERVER_KNOBS->TARGET_BYTES_PER_STORAGE_SERVER -
+		return std::max(std::max(1.0, (queueSize() - (SERVER_KNOBS->TARGET_BYTES_PER_STORAGE_SERVER -
 													  2.0 * SERVER_KNOBS->SPRING_BYTES_STORAGE_SERVER)) /
 								 SERVER_KNOBS->SPRING_BYTES_STORAGE_SERVER),
-						1.0 - currentRate());
+						1.0 / (1.0 - currentRate()));
 	}
 
 	template<class Reply>
