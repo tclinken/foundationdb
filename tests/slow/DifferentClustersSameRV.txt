@@ -1,8 +1,13 @@
 testTitle=DifferentClustersSameRV
-   testName=DifferentClustersSameRV
-   testDuration=150
-   switchAfter=50
-   keyToRead=someKey
-   keyToWatch=anotherKey
-   extraDB=2
-   clearAfterTest=false
+	testName=DifferentClustersSameRV
+	testDuration=150
+	switchAfter=50
+	keyToRead=someKey
+	keyToWatch=anotherKey
+	extraDB=2
+	clearAfterTest=false
+
+	testName=Attrition
+	machinesToKill=1
+	reboot=true
+	testDuration=100
