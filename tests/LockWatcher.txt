@@ -1,0 +1,9 @@
+testTitle=LockWatcher
+    testName=LockWatcher
+    extraDB=2
+
+    testName=Attrition
+    machinesToKill=10
+    machinesToLeave=3
+    reboot=true
+    testDuration=10.0
