@@ -136,6 +136,7 @@
     <ActorCompiler Include="workloads\TimeKeeperCorrectness.actor.cpp" />
     <ActorCompiler Include="workloads\DifferentClustersSameRV.actor.cpp" />
     <ActorCompiler Include="workloads\WriteDuringRead.actor.cpp" />
+    <ActorCompiler Include="workloads\WritesSkewedRangedReads.actor.cpp" />
     <ActorCompiler Include="workloads\Watches.actor.cpp" />
     <ActorCompiler Include="workloads\ThreadSafety.actor.cpp" />
     <ActorCompiler Include="workloads\RemoveServersSafely.actor.cpp" />

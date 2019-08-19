@@ -43,6 +43,7 @@
     <ClInclude Include="ActorCollection.h" />
     <ClInclude Include="actorcompiler.h" />
     <ClInclude Include="Arena.h" />
+    <ClInclude Include="ContinuousSample.h" />
     <ClInclude Include="DeterministicRandom.h" />
     <ClInclude Include="Error.h" />
     <ClInclude Include="error_definitions.h" />

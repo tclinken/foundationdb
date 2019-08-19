@@ -150,6 +150,9 @@
     <ActorCompiler Include="workloads\WriteDuringRead.actor.cpp">
       <Filter>workloads</Filter>
     </ActorCompiler>
+    <ActorCompiler Include="workloads\WritesSkewedRangedReads.actor.cpp">
+      <Filter>workloads</Filter>
+    </ActorCompiler>
     <ActorCompiler Include="workloads\CommitBugCheck.actor.cpp">
       <Filter>workloads</Filter>
     </ActorCompiler>
