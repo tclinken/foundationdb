@@ -23,6 +23,8 @@
 #include "flow/ThreadPrimitives.h"
 #include "flow/Trace.h"
 #include "flow/Error.h"
+#include "flow/Knobs.h"
+#include "flow/flow.h"
 
 #include <cstdint>
 #include <unordered_map>
@@ -78,6 +80,26 @@ ThreadInitFunction threadInitFunction = 0;  // See ThreadCleanup.cpp in the C bi
 void setFastAllocatorThreadInitFunction( ThreadInitFunction f ) { 
 	ASSERT( !threadInitFunction );
 	threadInitFunction = f; 
+}
+
+std::atomic<int64_t> g_hugeArenaMemory(0);
+
+double hugeArenaLastLogged = 0;
+std::map<std::string, std::pair<int,int>> hugeArenaTraces;
+
+void hugeArenaSample(int size) {
+	if(TraceEvent::isNetworkThread()) {
+		auto& info = hugeArenaTraces[platform::get_backtrace()];
+		info.first++;
+		info.second+=size;
+		if(now() - hugeArenaLastLogged > FLOW_KNOBS->HUGE_ARENA_LOGGING_INTERVAL) {
+			for(auto& it : hugeArenaTraces) {
+				TraceEvent("HugeArenaSample").detail("Count", it.second.first).detail("Size", it.second.second).detail("Backtrace", it.first);
+			}
+			hugeArenaLastLogged = now();
+			hugeArenaTraces.clear();
+		}
+	}
 }
 
 #ifdef ALLOC_INSTRUMENTATION
@@ -213,20 +235,24 @@ long long FastAllocator<Size>::getActiveThreads() {
 	return globalData()->activeThreads;
 }
 
+#if FAST_ALLOCATOR_DEBUG
 static int64_t getSizeCode(int i) {
 	switch (i) {
 		case 16: return 1;
 		case 32: return 2;
 		case 64: return 3;
-		case 128: return 4;
-		case 256: return 5;
-		case 512: return 6;
-		case 1024: return 7;
-		case 2048: return 8;
-		case 4096: return 9;
-		default: return 10;
+		case 96: return 4;
+		case 128: return 5;
+		case 256: return 6;
+		case 512: return 7;
+		case 1024: return 8;
+		case 2048: return 9;
+		case 4096: return 10;
+		case 8192: return 11;
+		default: return 12;
 	}
 }
+#endif
 
 template<int Size>
 void *FastAllocator<Size>::allocate() {
@@ -419,6 +445,9 @@ void FastAllocator<Size>::getMagazine() {
 	// FIXME: We should be able to allocate larger magazine sizes here if we
 	// detect that the underlying system supports hugepages.  Using hugepages
 	// with smaller-than-2MiB magazine sizes strands memory.  See issue #909.
+	if(FLOW_KNOBS && g_trace_depth == 0 && nondeterministicRandom()->random01() < (magazine_size * Size)/FLOW_KNOBS->FAST_ALLOC_LOGGING_BYTES) {
+		TraceEvent("GetMagazineSample").detail("Size", Size).backtrace();
+	}
 	block = (void **)::allocate(magazine_size * Size, false);
 #endif
 
@@ -470,12 +499,14 @@ void releaseAllThreadMagazines() {
 	FastAllocator<16>::releaseThreadMagazines();
 	FastAllocator<32>::releaseThreadMagazines();
 	FastAllocator<64>::releaseThreadMagazines();
+	FastAllocator<96>::releaseThreadMagazines();
 	FastAllocator<128>::releaseThreadMagazines();
 	FastAllocator<256>::releaseThreadMagazines();
 	FastAllocator<512>::releaseThreadMagazines();
 	FastAllocator<1024>::releaseThreadMagazines();
 	FastAllocator<2048>::releaseThreadMagazines();
 	FastAllocator<4096>::releaseThreadMagazines();
+	FastAllocator<8192>::releaseThreadMagazines();
 }
 
 int64_t getTotalUnusedAllocatedMemory() {
@@ -484,12 +515,14 @@ int64_t getTotalUnusedAllocatedMemory() {
 	unusedMemory += FastAllocator<16>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<32>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<64>::getApproximateMemoryUnused();
+	unusedMemory += FastAllocator<96>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<128>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<256>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<512>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<1024>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<2048>::getApproximateMemoryUnused();
 	unusedMemory += FastAllocator<4096>::getApproximateMemoryUnused();
+	unusedMemory += FastAllocator<8192>::getApproximateMemoryUnused();
 
 	return unusedMemory;
 }
@@ -497,10 +530,12 @@ int64_t getTotalUnusedAllocatedMemory() {
 template class FastAllocator<16>;
 template class FastAllocator<32>;
 template class FastAllocator<64>;
+template class FastAllocator<96>;
 template class FastAllocator<128>;
 template class FastAllocator<256>;
 template class FastAllocator<512>;
 template class FastAllocator<1024>;
 template class FastAllocator<2048>;
 template class FastAllocator<4096>;
+template class FastAllocator<8192>;
 

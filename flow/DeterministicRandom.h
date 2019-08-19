@@ -24,13 +24,17 @@
 
 #include <cinttypes>
 #include "flow/IRandom.h"
+#include "flow/Error.h"
+#include "flow/Trace.h"
+#include "flow/FastRef.h"
 
 #include <random>
 
-class DeterministicRandom : public IRandom {
+class DeterministicRandom : public IRandom, public ReferenceCounted<DeterministicRandom> {
 private:
 	std::mt19937 random;
 	uint64_t next;
+	bool useRandLog;
 
 	uint64_t gen64() {
 		uint64_t curr = next;
@@ -40,13 +44,13 @@ private:
 	}
 
 public:
-	DeterministicRandom( uint32_t seed ) : random( (unsigned long)seed ), next( (uint64_t(random()) << 32) ^ random() ) {
+	DeterministicRandom( uint32_t seed, bool useRandLog=false ) : random( (unsigned long)seed ), next( (uint64_t(random()) << 32) ^ random() ), useRandLog(useRandLog) {
 		UNSTOPPABLE_ASSERT( seed != 0 );  // docs for mersenne twister say x0>0
 	};
 
 	double random01() {
 		double d = gen64() / double(uint64_t(-1));
-		if (randLog && g_random==this) fprintf(randLog, "R01  %f\n", d);
+		if (randLog && useRandLog) fprintf(randLog, "R01  %f\n", d);
 		return d;
 	}
 
@@ -62,10 +66,10 @@ public:
 		uint64_t v = (gen64() % range);
 		int i;
 		if (min < 0 && ((unsigned int) -min) > v)
-			i = -(((unsigned int) -min) - v);
+			i = -(int)(((unsigned int) -min) - v);
 		else
 			i = v + min;
-		if (randLog && g_random==this) fprintf(randLog, "Rint %d\n", i);
+		if (randLog && useRandLog) fprintf(randLog, "Rint %d\n", i);
 		return i;
 	}
 
@@ -81,27 +85,35 @@ public:
 		uint64_t v = (gen64() % range);
 		int64_t i;
 		if (min < 0 && ((uint64_t) -min) > v)
-			i = -(((uint64_t) -min) - v);
+			i = -(int64_t)(((uint64_t) -min) - v);
 		else
 			i = v + min;
-		if (randLog && g_random==this) fprintf(randLog, "Rint64 %" PRId64 "\n", i);
+		if (randLog && useRandLog) fprintf(randLog, "Rint64 %" PRId64 "\n", i);
 		return i;
 	}
 
 	uint32_t randomUInt32() { return gen64(); }
 
+	uint32_t randomSkewedUInt32(uint32_t min, uint32_t maxPlusOne) {
+		std::uniform_real_distribution<double> distribution( std::log(min), std::log(maxPlusOne-1) );
+		double logpower = distribution(random);
+		uint32_t loguniform = static_cast<uint32_t>( std::pow( 10, logpower ) );
+		// doubles can be imprecise, so let's make sure we don't violate an edge case.
+		return std::max(std::min(loguniform, maxPlusOne-1), min);
+	}
+
 	UID randomUniqueID() {
 		uint64_t x,y;
 		x = gen64();
 		y = gen64();
-		if (randLog && g_random == this) fprintf(randLog, "Ruid %" PRIx64 " %" PRIx64 "\n", x, y);
+		if (randLog && useRandLog) fprintf(randLog, "Ruid %" PRIx64 " %" PRIx64 "\n", x, y);
 		return UID(x,y);
 	}
 
 	char randomAlphaNumeric() {
 		static const char alphanum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 		char c = alphanum[ gen64() % 62 ];
-		if (randLog && g_random==this) fprintf(randLog, "Rchar %c\n", c);
+		if (randLog && useRandLog) fprintf(randLog, "Rchar %c\n", c);
 		return c;
 	}
 
@@ -114,6 +126,9 @@ public:
 	}
 
 	uint64_t peek() const { return next; }
+
+	virtual void addref() { ReferenceCounted<DeterministicRandom>::addref(); }
+	virtual void delref() { ReferenceCounted<DeterministicRandom>::delref(); }
 };
 
 #endif

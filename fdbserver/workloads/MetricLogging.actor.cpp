@@ -19,10 +19,10 @@
  */
 
 #include "fdbrpc/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
 #include "flow/TDMetric.actor.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 struct MetricLoggingWorkload : TestWorkload {
@@ -90,8 +90,6 @@ struct MetricLoggingWorkload : TestWorkload {
 
 	ACTOR Future<Void> MetricLoggingClient( Database cx, MetricLoggingWorkload *self, int clientId, int actorId )	{
 		state BinaryWriter writer( Unversioned() );
-		state uint64_t lastTime = 0;
-		state double startTime = now();
 		loop {
 			for( int i = 0; i < 100; i++ ) {
 				if( self->testBool ) {

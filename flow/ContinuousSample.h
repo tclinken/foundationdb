@@ -29,9 +29,9 @@ public:
 
         if (populationSize <= sampleSize) {
             samples.push_back(sample);
-        } else if (g_random->random01() <
+        } else if (deterministicRandom()->random01() <
                    ((double)sampleSize / populationSize)) {
-            samples[g_random->randomInt(0, sampleSize)] = sample;
+            samples[deterministicRandom()->randomInt(0, sampleSize)] = sample;
         }
 
         _max = std::max(_max, sample);

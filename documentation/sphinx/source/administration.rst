@@ -141,6 +141,21 @@ Any client connected to FoundationDB can access information about its cluster fi
 * To get the path to the cluster file, read the key ``\xFF\xFF/cluster_file_path``.
 * To get the contents of the cluster file, read the key ``\xFF\xFF/connection_string``.
 
+.. _ipv6-support:
+
+IPv6 Support
+============
+
+FoundationDB (since v6.1) can accept network connections from clients connecting over IPv6. IPv6 address/port pair is represented as ``[IP]:PORT``, e.g. "[::1]:4800", "[abcd::dead:beef]:4500".
+
+1) The cluster file can contain mix of IPv4 and IPv6 addresses. For example::
+
+     description:ID@127.0.0.1:4500,[::1]:4500,...
+
+2) Starting ``fdbserver`` with IPv6::
+
+     $ /path/to/fdbserver -C fdb.cluster -p \[::1\]:4500
+
 .. _adding-machines-to-a-cluster:
 
 Adding machines to a cluster
@@ -217,7 +232,7 @@ The procedures for adding and removing machines can be combined into a recipe fo
 Converting an existing cluster to use TLS
 =========================================
 
-A FoundationDB cluster has the option of supporting :doc:`Transport Layer Security (TLS) <tls>`. To enable TLS on an existing, non-TLS cluster, see :ref:`Converting a running cluster <converting-existing-cluster>`.
+A FoundationDB cluster has the option of supporting :doc:`Transport Layer Security (TLS) <tls>`. To enable TLS on an existing, non-TLS cluster, see :ref:`Converting a running cluster <converting-existing-cluster-after-6.1>`.
 
 .. _administration-monitoring-cluster-status:
 
@@ -646,10 +661,20 @@ You can now remove old client library versions from your clients. This is only t
 Version-specific notes on upgrading
 ===================================
 
+Upgrading from 6.2.x
+--------------------
+
+Upgrades from 6.2.x will keep all your old data and configuration settings.
+
+Upgrading from 6.1.x
+--------------------
+
+Upgrades from 6.1.x will keep all your old data and configuration settings. Data distribution will slowly reorganize how data is spread across storage servers.
+
 Upgrading from 6.0.x
 --------------------
 
-Upgrades from 6.0.x will keep all your old data and configuration settings. 
+Upgrades from 6.0.x will keep all your old data and configuration settings. Data distribution will slowly reorganize how data is spread across storage servers.
 
 Upgrading from 5.2.x
 --------------------

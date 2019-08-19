@@ -18,8 +18,9 @@
  * limitations under the License.
  */
 
-#include "fdbserver/workloads/workloads.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "flow/UnitTest.h"
+#include "flow/actorcompiler.h" // has to be last include
 
 void forceLinkIndexedSetTests();
 void forceLinkDequeTests();
@@ -62,7 +63,6 @@ struct UnitTestWorkload : TestWorkload {
 
 	ACTOR static Future<Void> runUnitTests(UnitTestWorkload* self) {
 		state std::vector<UnitTest*> tests;
-		state int allTestCount = 0;
 
 		for (auto t = g_unittests.tests; t != NULL; t = t->next) {
 			if (StringRef(t->name).startsWith(self->testPattern)) {
@@ -71,13 +71,13 @@ struct UnitTestWorkload : TestWorkload {
 			}
 		}
 		fprintf(stdout, "Found %zu tests\n", tests.size());
-		g_random->randomShuffle(tests);
+		deterministicRandom()->randomShuffle(tests);
 		if (self->testRunLimit > 0 && tests.size() > self->testRunLimit) 
 			tests.resize(self->testRunLimit);
 
 		state std::vector<UnitTest*>::iterator t;
 		for (t = tests.begin(); t != tests.end(); ++t) {
-			auto test = *t;
+			state UnitTest* test = *t;
 			printf("Testing %s\n", test->name);
 
 			state Error result = success();
@@ -97,8 +97,6 @@ struct UnitTestWorkload : TestWorkload {
 
 			self->totalWallTime += wallTime;
 			self->totalSimTime += simTime;
-
-			auto test = *t;
 			TraceEvent(result.code() != error_code_success ? SevError : SevInfo, "UnitTest")
 				.error(result, true)
 				.detail("Name", test->name)

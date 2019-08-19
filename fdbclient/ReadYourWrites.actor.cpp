@@ -32,12 +32,18 @@ public:
 		it.skip(allKeys.begin);
 		Arena arena;
 		while( true ) {
-			TraceEvent("RYWDump").detail("Begin", printable(it.beginKey().toStandaloneStringRef()))
-				.detail("End", printable(it.endKey().toStandaloneStringRef()))
-				.detail("Unknown", it.is_unknown_range())
-				.detail("Empty", it.is_empty_range())
-				.detail("KV", it.is_kv())
-				.detail("Key", printable(it.is_kv() ? it.kv(arena).key : StringRef()));
+			Optional<StringRef> key = StringRef();
+			if (it.is_kv()) {
+				auto kv = it.kv(arena);
+				if (kv) key = kv->key;
+			}
+			TraceEvent("RYWDump")
+			    .detail("Begin", it.beginKey())
+			    .detail("End", it.endKey())
+			    .detail("Unknown", it.is_unknown_range())
+			    .detail("Empty", it.is_empty_range())
+			    .detail("KV", it.is_kv())
+			    .detail("Key", key.get());
 			if( it.endKey() == allKeys.end )
 				break;
 			++it;
@@ -74,13 +80,18 @@ public:
 		it->skip(read.key);
 		state bool dependent = it->is_dependent();
 		if( it->is_kv() ) {
-			return it->kv(ryw->arena).value;
+			const KeyValueRef* result = it->kv(ryw->arena);
+			if (result != nullptr) {
+				return result->value;
+			} else {
+				return Optional<Value>();
+			}
 		} else if( it->is_empty_range() ) {
 			return Optional<Value>();
 		} else {
 			Optional<Value> res = wait( ryw->tr.get( read.key, true ) );
 			KeyRef k( ryw->arena, read.key );
-			
+
 			if( res.present() ) {
 				if( ryw->cache.insert( k, res.get() ) )
 					ryw->arena.dependsOn(res.get().arena());
@@ -96,7 +107,12 @@ public:
 			it->skip(k);
 
 			ASSERT( it->is_kv() );
-			return it->kv(ryw->arena).value;
+			const KeyValueRef* result = it->kv(ryw->arena);
+			if (result != nullptr) {
+				return result->value;
+			} else {
+				return Optional<Value>();
+			}
 		}
 	}
 
@@ -456,7 +472,7 @@ public:
 		state bool readThroughEnd = false;
 		state int actualBeginOffset = begin.offset;
 		state int actualEndOffset = end.offset;
-		//state UID randomID = g_nondeterministic_random->randomUniqueID();
+		//state UID randomID = nondeterministicRandom()->randomUniqueID();
 
 		resolveKeySelectorFromCache( begin, it, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualBeginOffset );
 		resolveKeySelectorFromCache( end, itEnd, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualEndOffset );
@@ -496,8 +512,8 @@ public:
 				.detail("Reached", limits.isReached())
 				.detail("ItemsPastEnd", itemsPastEnd)
 				.detail("EndOffset", -end.offset)
-				.detail("ItBegin", printable(it.beginKey().toStandaloneStringRef()))
-				.detail("ItEnd", printable(itEnd.beginKey().toStandaloneStringRef()))
+				.detail("ItBegin", it.beginKey())
+				.detail("ItEnd", itEnd.beginKey())
 				.detail("Unknown", it.is_unknown_range())
 				.detail("Requests", requestCount);*/
 
@@ -590,13 +606,13 @@ public:
 				ASSERT( !requestLimit.hasRowLimit() || requestLimit.rows > 0 );
 				ASSERT( requestLimit.hasRowLimit() || requestLimit.hasByteLimit() );
 				
-				//TraceEvent("RYWIssuing", randomID).detail("Begin", read_begin.toString()).detail("End", read_end.toString()).detail("Bytes", requestLimit.bytes).detail("Rows", requestLimit.rows).detail("Limits", limits.bytes).detail("Reached", limits.isReached()).detail("RequestCount", requestCount).detail("SingleClears", singleClears).detail("UcEnd", printable(ucEnd.beginKey().toStandaloneStringRef())).detail("MinRows", requestLimit.minRows);
+				//TraceEvent("RYWIssuing", randomID).detail("Begin", read_begin.toString()).detail("End", read_end.toString()).detail("Bytes", requestLimit.bytes).detail("Rows", requestLimit.rows).detail("Limits", limits.bytes).detail("Reached", limits.isReached()).detail("RequestCount", requestCount).detail("SingleClears", singleClears).detail("UcEnd", ucEnd.beginKey()).detail("MinRows", requestLimit.minRows);
 
 				additionalRows = 0;
 				Standalone<RangeResultRef> snapshot_read = wait( ryw->tr.getRange( read_begin, read_end, requestLimit, true, false ) );
 				KeyRangeRef range = getKnownKeyRange( snapshot_read, read_begin, read_end, ryw->arena );
 				
-				//TraceEvent("RYWCacheInsert", randomID).detail("Range", printable(range)).detail("ExpectedSize", snapshot_read.expectedSize()).detail("Rows", snapshot_read.size()).detail("Results", printable(snapshot_read)).detail("More", snapshot_read.more).detail("ReadToBegin", snapshot_read.readToBegin).detail("ReadThroughEnd", snapshot_read.readThroughEnd).detail("ReadThrough", printable(snapshot_read.readThrough));
+				//TraceEvent("RYWCacheInsert", randomID).detail("Range", range).detail("ExpectedSize", snapshot_read.expectedSize()).detail("Rows", snapshot_read.size()).detail("Results", snapshot_read).detail("More", snapshot_read.more).detail("ReadToBegin", snapshot_read.readToBegin).detail("ReadThroughEnd", snapshot_read.readThroughEnd).detail("ReadThrough", snapshot_read.readThrough);
 
 				if( ryw->cache.insert( range, snapshot_read ) )
 					ryw->arena.dependsOn(snapshot_read.arena());
@@ -605,10 +621,14 @@ public:
 				resolveKeySelectorFromCache( begin, it, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualBeginOffset );
 				resolveKeySelectorFromCache( end, itEnd, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualEndOffset );
 			} else if (it.is_kv()) {
-				KeyValueRef const* start = &it.kv(ryw->arena);
+				KeyValueRef const* start = it.kv(ryw->arena);
+				if (start == nullptr) {
+					++it;
+					continue;
+				}
 				it.skipContiguous( end.isFirstGreaterOrEqual() ? end.getKey() : ryw->getMaxReadKey() ); //not technically correct since this would add end.getKey(), but that is protected above
-				
-				int maxCount = &it.kv(ryw->arena) - start + 1;
+
+				int maxCount = it.kv(ryw->arena) - start + 1;
 				int count = 0;
 				for(; count < maxCount && !limits.isReached(); count++ ) {
 					limits.decrement(start[count]);
@@ -616,7 +636,7 @@ public:
 
 				itemsPastEnd += maxCount - count;
 				
-				//TraceEvent("RYWaddKV", randomID).detail("Key", printable(it.beginKey().toStandaloneStringRef())).detail("Count", count).detail("MaxCount", maxCount).detail("ItemsPastEnd", itemsPastEnd);
+				//TraceEvent("RYWaddKV", randomID).detail("Key", it.beginKey()).detail("Count", count).detail("MaxCount", maxCount).detail("ItemsPastEnd", itemsPastEnd);
 				if( count ) result.append( result.arena(), start, count );
 				++it;
 			} else
@@ -725,7 +745,7 @@ public:
 		state bool readThroughEnd = false;
 		state int actualBeginOffset = begin.offset;
 		state int actualEndOffset = end.offset;
-		//state UID randomID = g_nondeterministic_random->randomUniqueID();
+		//state UID randomID = nondeterministicRandom()->randomUniqueID();
 
 		resolveKeySelectorFromCache( end, it, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualEndOffset );
 		resolveKeySelectorFromCache( begin, itEnd, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualBeginOffset );
@@ -765,8 +785,8 @@ public:
 				.detail("Reached", limits.isReached())
 				.detail("ItemsPastBegin", itemsPastBegin)
 				.detail("EndOffset", end.offset)
-				.detail("ItBegin", printable(it.beginKey().toStandaloneStringRef()))
-				.detail("ItEnd", printable(itEnd.beginKey().toStandaloneStringRef()))
+				.detail("ItBegin", it.beginKey())
+				.detail("ItEnd", itEnd.beginKey())
 				.detail("Unknown", it.is_unknown_range())
 				.detail("Kv", it.is_kv())
 				.detail("Requests", requestCount);*/
@@ -863,13 +883,13 @@ public:
 				ASSERT( !requestLimit.hasRowLimit() || requestLimit.rows > 0 );
 				ASSERT( requestLimit.hasRowLimit() || requestLimit.hasByteLimit() );
 
-				//TraceEvent("RYWIssuing", randomID).detail("Begin", read_begin.toString()).detail("End", read_end.toString()).detail("Bytes", requestLimit.bytes).detail("Rows", requestLimit.rows).detail("Limits", limits.bytes).detail("Reached", limits.isReached()).detail("RequestCount", requestCount).detail("SingleClears", singleClears).detail("UcEnd", printable(ucEnd.beginKey().toStandaloneStringRef())).detail("MinRows", requestLimit.minRows);
+				//TraceEvent("RYWIssuing", randomID).detail("Begin", read_begin.toString()).detail("End", read_end.toString()).detail("Bytes", requestLimit.bytes).detail("Rows", requestLimit.rows).detail("Limits", limits.bytes).detail("Reached", limits.isReached()).detail("RequestCount", requestCount).detail("SingleClears", singleClears).detail("UcEnd", ucEnd.beginKey()).detail("MinRows", requestLimit.minRows);
 
 				additionalRows = 0;
 				Standalone<RangeResultRef> snapshot_read = wait( ryw->tr.getRange( read_begin, read_end, requestLimit, true, true ) );
 				KeyRangeRef range = getKnownKeyRangeBack( snapshot_read, read_begin, read_end, ryw->arena );
 
-				//TraceEvent("RYWCacheInsert", randomID).detail("Range", printable(range)).detail("ExpectedSize", snapshot_read.expectedSize()).detail("Rows", snapshot_read.size()).detail("Results", printable(snapshot_read)).detail("More", snapshot_read.more).detail("ReadToBegin", snapshot_read.readToBegin).detail("ReadThroughEnd", snapshot_read.readThroughEnd).detail("ReadThrough", printable(snapshot_read.readThrough));
+				//TraceEvent("RYWCacheInsert", randomID).detail("Range", range).detail("ExpectedSize", snapshot_read.expectedSize()).detail("Rows", snapshot_read.size()).detail("Results", snapshot_read).detail("More", snapshot_read.more).detail("ReadToBegin", snapshot_read.readToBegin).detail("ReadThroughEnd", snapshot_read.readThroughEnd).detail("ReadThrough", snapshot_read.readThrough);
 				
 				RangeResultRef reversed;
 				reversed.resize(ryw->arena, snapshot_read.size());
@@ -884,10 +904,11 @@ public:
 				resolveKeySelectorFromCache( end, it, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualEndOffset );
 				resolveKeySelectorFromCache( begin, itEnd, ryw->getMaxReadKey(), &readToBegin, &readThroughEnd, &actualBeginOffset );
 			} else {
-				if (it.is_kv()) {
-					KeyValueRef const* end = &it.kv(ryw->arena);
+				KeyValueRef const* end = it.is_kv() ? it.kv(ryw->arena) : nullptr;
+				if (end != nullptr) {
 					it.skipContiguousBack( begin.isFirstGreaterOrEqual() ? begin.getKey() : allKeys.begin );
-					KeyValueRef const* start = &it.kv(ryw->arena);
+					KeyValueRef const* start = it.kv(ryw->arena);
+					ASSERT(start != nullptr);
 
 					int maxCount = end - start + 1;
 					int count = 0;
@@ -896,7 +917,7 @@ public:
 					}
 
 					itemsPastBegin += maxCount - count;
-					//TraceEvent("RYWaddKV", randomID).detail("Key", printable(it.beginKey().toStandaloneStringRef())).detail("Count", count).detail("MaxCount", maxCount).detail("ItemsPastBegin", itemsPastBegin);
+					//TraceEvent("RYWaddKV", randomID).detail("Key", it.beginKey()).detail("Count", count).detail("MaxCount", maxCount).detail("ItemsPastBegin", itemsPastBegin);
 					if( count ) {
 						int size = result.size();
 						result.resize(result.arena(),size+count);
@@ -969,9 +990,10 @@ public:
 		if(!ryw->options.readYourWritesDisabled) {
 			ryw->watchMap[key].push_back(watch);
 			val = readWithConflictRange( ryw, GetValueReq(key), false );
-		}
-		else
+		} else {
+			ryw->approximateSize += 2 * key.expectedSize() + 1;
 			val = ryw->tr.get(key);
+		}
 
 		try {
 			wait(ryw->resetPromise.getFuture() || success(val) || watch->onChangeTrigger.getFuture());
@@ -1024,8 +1046,8 @@ public:
 
 				return Void();
 			}
-			
-			ryw->writeRangeToNativeTransaction(KeyRangeRef(StringRef(), ryw->getMaxWriteKey()));
+
+			ryw->writeRangeToNativeTransaction(KeyRangeRef(StringRef(), allKeys.end));
 
 			auto conflictRanges = ryw->readConflicts.ranges();
 			for( auto iter = conflictRanges.begin(); iter != conflictRanges.end(); ++iter ) {
@@ -1076,7 +1098,12 @@ public:
 			return Void(); 
 		} catch( Error &e ) {
 			if ( !ryw->resetPromise.isSet() ) {
-				ryw->resetRyow();
+				if(ryw->tr.apiVersionAtLeast(610)) {
+					ryw->resetPromise.sendError(transaction_cancelled());
+				}
+				else {
+					ryw->resetRyow();
+				}
 			}
 			if( e.code() == error_code_broken_promise )
 				throw transaction_cancelled();
@@ -1097,18 +1124,25 @@ public:
 	}
 };
 
-ReadYourWritesTransaction::ReadYourWritesTransaction( Database const& cx ) : cache(&arena), writes(&arena), tr(cx), retries(0), creationTime(now()), commitStarted(false), options(tr), deferredError(cx->deferredError) {}
+ReadYourWritesTransaction::ReadYourWritesTransaction(Database const& cx)
+  : cache(&arena), writes(&arena), tr(cx), retries(0), approximateSize(0), creationTime(now()), commitStarted(false),
+    options(tr), deferredError(cx->deferredError) {
+	std::copy(cx.getTransactionDefaults().begin(), cx.getTransactionDefaults().end(),
+	          std::back_inserter(persistentOptions));
+	applyPersistentOptions();
+}
 
-ACTOR Future<Void> timebomb(double totalSeconds, Promise<Void> resetPromise) {
-	if(totalSeconds == 0.0) {
-		wait ( Never() );
-	}
-	else if (now() < totalSeconds) {
-		wait ( delayUntil( totalSeconds ) );
+ACTOR Future<Void> timebomb(double endTime, Promise<Void> resetPromise) {
+	if (now() < endTime) {
+		wait ( delayUntil( endTime ) );
 	}
 	if( !resetPromise.isSet() )
 		resetPromise.sendError(transaction_timed_out());
 	throw transaction_timed_out();	
+}
+
+void ReadYourWritesTransaction::resetTimeout() {
+	timeoutActor = options.timeoutInSeconds == 0.0 ? Void() : timebomb(options.timeoutInSeconds + creationTime, resetPromise);
 }
 
 Future<Version> ReadYourWritesTransaction::getReadVersion() {
@@ -1201,7 +1235,7 @@ Future< Optional<Value> > ReadYourWritesTransaction::get( const Key& key, bool s
 	if( resetPromise.isSet() )
 		return resetPromise.getFuture().getError();
 	
-	if(key >= getMaxReadKey())
+	if(key >= getMaxReadKey() && key != metadataVersionKey)
 		return key_outside_legal_range();
 
 	//There are no keys in the database with size greater than KEY_SIZE_LIMIT
@@ -1315,7 +1349,7 @@ void ReadYourWritesTransaction::addReadConflictRange( KeyRangeRef const& keys ) 
 	}
 	
 	if (tr.apiVersionAtLeast(300)) {
-		if (keys.begin > getMaxReadKey() || keys.end > getMaxReadKey()) {
+		if ((keys.begin > getMaxReadKey() || keys.end > getMaxReadKey()) && (keys.begin != metadataVersionKey || keys.end != metadataVersionKeyEnd)) {
 			throw key_outside_legal_range();
 		}
 	}
@@ -1337,6 +1371,7 @@ void ReadYourWritesTransaction::addReadConflictRange( KeyRangeRef const& keys ) 
 	}
 
 	if(options.readYourWritesDisabled) {
+		approximateSize += r.expectedSize() + sizeof(KeyRangeRef);
 		tr.addReadConflictRange(r);
 		return;
 	}
@@ -1351,6 +1386,7 @@ void ReadYourWritesTransaction::updateConflictMap( KeyRef const& key, WriteMap::
 	//it.skip( key );
 	//ASSERT( it.beginKey() <= key && key < it.endKey() );
 	if( it.is_unmodified_range() || ( it.is_operation() && !it.is_independent() ) ) {
+		approximateSize += 2 * key.expectedSize() + 1 + sizeof(KeyRangeRef);
 		readConflicts.insert( singleKeyRange( key, arena ), true );
 	}
 }
@@ -1361,13 +1397,15 @@ void ReadYourWritesTransaction::updateConflictMap( KeyRangeRef const& keys, Writ
 	for(; it.beginKey() < keys.end; ++it ) {
 		if( it.is_unmodified_range() || ( it.is_operation() && !it.is_independent() ) ) {
 			KeyRangeRef insert_range = KeyRangeRef( std::max( keys.begin, it.beginKey().toArenaOrRef( arena ) ), std::min( keys.end, it.endKey().toArenaOrRef( arena ) ) );
-			if( !insert_range.empty() )
+			if (!insert_range.empty()) {
+				approximateSize += keys.expectedSize() + sizeof(KeyRangeRef);
 				readConflicts.insert( insert_range, true );
+			}
 		}
 	}
 }
 
-void ReadYourWritesTransaction::writeRangeToNativeTransaction( KeyRangeRef const& keys ) {
+void ReadYourWritesTransaction::writeRangeToNativeTransaction(KeyRangeRef const& keys) {
 	WriteMap::iterator it( &writes );
 	it.skip(keys.begin);
 
@@ -1380,12 +1418,12 @@ void ReadYourWritesTransaction::writeRangeToNativeTransaction( KeyRangeRef const
 			clearBegin = std::max(ExtStringRef(keys.begin), it.beginKey());
 			inClearRange = true;
 		} else if( !it.is_cleared_range() && inClearRange ) {
-			tr.clear( KeyRangeRef( clearBegin.toArenaOrRef(arena), it.beginKey().toArenaOrRef(arena) ), false );
+			tr.clear(KeyRangeRef(clearBegin.toArenaOrRef(arena), it.beginKey().toArenaOrRef(arena)), false);
 			inClearRange = false;
 		}
 	}
 
-	if( inClearRange ) {
+	if (inClearRange) {
 		tr.clear(KeyRangeRef(clearBegin.toArenaOrRef(arena), keys.end), false);
 	}
 
@@ -1399,7 +1437,7 @@ void ReadYourWritesTransaction::writeRangeToNativeTransaction( KeyRangeRef const
 			conflictBegin = std::max(ExtStringRef(keys.begin), it.beginKey());
 			inConflictRange = true;
 		} else if( !it.is_conflict_range() && inConflictRange ) {
-			tr.addWriteConflictRange( KeyRangeRef( conflictBegin.toArenaOrRef(arena), it.beginKey().toArenaOrRef(arena) ) );
+			tr.addWriteConflictRange(KeyRangeRef(conflictBegin.toArenaOrRef(arena), it.beginKey().toArenaOrRef(arena)));
 			inConflictRange = false;
 		}
 
@@ -1409,7 +1447,11 @@ void ReadYourWritesTransaction::writeRangeToNativeTransaction( KeyRangeRef const
 			for( int i = 0; i < op.size(); ++i) {
 				switch(op[i].type) {
 					case MutationRef::SetValue:
-						tr.set( it.beginKey().assertRef(), op[i].value.get(), false );
+						if (op[i].value.present()) {
+							tr.set(it.beginKey().assertRef(), op[i].value.get(), false);
+						} else {
+							tr.clear(it.beginKey().assertRef(), false);
+						}
 						break;
 					case MutationRef::AddValue:
 					case MutationRef::AppendIfFits:
@@ -1424,7 +1466,8 @@ void ReadYourWritesTransaction::writeRangeToNativeTransaction( KeyRangeRef const
 					case MutationRef::ByteMax:
 					case MutationRef::MinV2:
 					case MutationRef::AndV2:
-						tr.atomicOp( it.beginKey().assertRef(), op[i].value.get(), op[i].type, false );
+					case MutationRef::CompareAndClear:
+						tr.atomicOp(it.beginKey().assertRef(), op[i].value.get(), op[i].type, false);
 						break;
 					default:
 						break;
@@ -1434,8 +1477,19 @@ void ReadYourWritesTransaction::writeRangeToNativeTransaction( KeyRangeRef const
 	}
 
 	if( inConflictRange ) {
-		tr.addWriteConflictRange( KeyRangeRef( conflictBegin.toArenaOrRef(arena), keys.end ) );
+		tr.addWriteConflictRange(KeyRangeRef(conflictBegin.toArenaOrRef(arena), keys.end));
 	}
+}
+
+ReadYourWritesTransactionOptions::ReadYourWritesTransactionOptions(Transaction const& tr) {
+	reset(tr);
+}
+
+void ReadYourWritesTransactionOptions::reset(Transaction const& tr) {
+	memset(this, 0, sizeof(*this));
+	timeoutInSeconds = 0.0;
+	maxRetries = -1;
+	snapshotRywEnabled = tr.getDatabase()->snapshotRywEnabled;
 }
 
 bool ReadYourWritesTransactionOptions::getAndResetWriteConflictDisabled() {
@@ -1473,8 +1527,14 @@ void ReadYourWritesTransaction::atomicOp( const KeyRef& key, const ValueRef& ope
 		throw used_during_commit();
 	}
 
-	if(key >= getMaxWriteKey())
+	if (key == metadataVersionKey) {
+		if(operationType != MutationRef::SetVersionstampedValue || operand != metadataVersionRequiredValue) {
+			throw client_invalid_operation();
+		}
+	}
+	else if(key >= getMaxWriteKey()) {
 		throw key_outside_legal_range();
+	}
 
 	if(!isValidMutationType(operationType) || !isAtomicOp((MutationRef::Type) operationType))
 		throw invalid_mutation_type();
@@ -1522,7 +1582,9 @@ void ReadYourWritesTransaction::atomicOp( const KeyRef& key, const ValueRef& ope
 			throw client_invalid_operation();
 	}
 
-	if(options.readYourWritesDisabled) {
+	approximateSize += k.expectedSize() + v.expectedSize() + sizeof(MutationRef) +
+	                   (addWriteConflict ? sizeof(KeyRangeRef) + 2 * key.expectedSize() + 1 : 0);
+	if (options.readYourWritesDisabled) {
 		return tr.atomicOp(k, v, (MutationRef::Type) operationType, addWriteConflict);
 	}
 
@@ -1539,7 +1601,10 @@ void ReadYourWritesTransaction::set( const KeyRef& key, const ValueRef& value ) 
 		BinaryReader::fromStringRef<ClientWorkerInterface>(value, IncludeVersion()).reboot.send( RebootRequest(false, true) );
 		return;
 	}
-	
+	if (key == metadataVersionKey) {
+		throw client_invalid_operation();
+	}
+
 	bool addWriteConflict = !options.getAndResetWriteConflictDisabled();
 
 	if(checkUsedDuringCommit()) {
@@ -1549,7 +1614,9 @@ void ReadYourWritesTransaction::set( const KeyRef& key, const ValueRef& value ) 
 	if(key >= getMaxWriteKey())
 		throw key_outside_legal_range();
 
-	if(options.readYourWritesDisabled ) {
+	approximateSize += key.expectedSize() + value.expectedSize() + sizeof(MutationRef) +
+	                   (addWriteConflict ? sizeof(KeyRangeRef) + 2 * key.expectedSize() + 1 : 0);
+	if (options.readYourWritesDisabled) {
 		return tr.set(key, value, addWriteConflict);
 	}
 
@@ -1577,10 +1644,12 @@ void ReadYourWritesTransaction::clear( const KeyRangeRef& range ) {
 	if(range.begin > maxKey || range.end > maxKey)
 		throw key_outside_legal_range();
 
-	if( options.readYourWritesDisabled ) {
+	approximateSize += range.expectedSize() + sizeof(MutationRef) +
+	                   (addWriteConflict ? sizeof(KeyRangeRef) + range.expectedSize() : 0);
+	if (options.readYourWritesDisabled) {
 		return tr.clear(range, addWriteConflict);
 	}
-	
+
 	//There aren't any keys in the database with size larger than KEY_SIZE_LIMIT, so if range contains large keys
 	//we can translate it to an equivalent one with smaller keys
 	KeyRef begin = range.begin;
@@ -1621,6 +1690,8 @@ void ReadYourWritesTransaction::clear( const KeyRef& key ) {
 	}
 	
 	KeyRangeRef r = singleKeyRange( key, arena );
+	approximateSize += r.expectedSize() + sizeof(KeyRangeRef) +
+	                   (addWriteConflict ? sizeof(KeyRangeRef) + r.expectedSize() : 0);
 
 	//SOMEDAY: add an optimized single key clear to write map
 	writes.clear(r, addWriteConflict);
@@ -1639,7 +1710,7 @@ Future<Void> ReadYourWritesTransaction::watch(const Key& key) {
 	if( options.readYourWritesDisabled )
 		return watches_disabled();
 
-	if(key >= allKeys.end || (key >= getMaxReadKey() && tr.apiVersionAtLeast(300)))
+	if(key >= allKeys.end || (key >= getMaxReadKey() && key != metadataVersionKey && tr.apiVersionAtLeast(300)))
 		return key_outside_legal_range();
 
 	if (key.size() > (key.startsWith(systemKeys.begin) ? CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT : CLIENT_KNOBS->KEY_SIZE_LIMIT))
@@ -1648,7 +1719,7 @@ Future<Void> ReadYourWritesTransaction::watch(const Key& key) {
 	return RYWImpl::watch(this, key);
 }
 
-void ReadYourWritesTransaction::addWriteConflictRange( KeyRangeRef const& keys ) {
+void ReadYourWritesTransaction::addWriteConflictRange(KeyRangeRef const& keys) {
 	if(checkUsedDuringCommit()) {
 		throw used_during_commit();
 	}
@@ -1675,6 +1746,7 @@ void ReadYourWritesTransaction::addWriteConflictRange( KeyRangeRef const& keys )
 		return;
 	}
 
+	approximateSize += r.expectedSize() + sizeof(KeyRangeRef);
 	if(options.readYourWritesDisabled) {
 		tr.addWriteConflictRange(r);
 		return;
@@ -1703,7 +1775,15 @@ Future<Standalone<StringRef>> ReadYourWritesTransaction::getVersionstamp() {
 	return waitOrError(tr.getVersionstamp(), resetPromise.getFuture());
 }
 
-void ReadYourWritesTransaction::setOption( FDBTransactionOptions::Option option, Optional<StringRef> value ) { 
+void ReadYourWritesTransaction::setOption( FDBTransactionOptions::Option option, Optional<StringRef> value ) {
+	setOptionImpl(option, value);
+
+	if (FDBTransactionOptions::optionInfo.getMustExist(option).persistent) {
+		persistentOptions.emplace_back(option, value.castTo<Standalone<StringRef>>());
+	}
+}
+
+void ReadYourWritesTransaction::setOptionImpl( FDBTransactionOptions::Option option, Optional<StringRef> value ) { 
 	switch(option) {
 		case FDBTransactionOptions::READ_YOUR_WRITES_DISABLE:
 			validateOptionValue(value, false);
@@ -1741,7 +1821,7 @@ void ReadYourWritesTransaction::setOption( FDBTransactionOptions::Option option,
 
 		case FDBTransactionOptions::TIMEOUT:
 			options.timeoutInSeconds = extractIntOption(value, 0, std::numeric_limits<int>::max())/1000.0;
-			timeoutActor = timebomb(options.timeoutInSeconds == 0.0 ? options.timeoutInSeconds : options.timeoutInSeconds + creationTime, resetPromise);
+			resetTimeout();
 			break;
 
 		case FDBTransactionOptions::RETRY_LIMIT:
@@ -1779,7 +1859,7 @@ void ReadYourWritesTransaction::setOption( FDBTransactionOptions::Option option,
 	tr.setOption( option, value );
 }
 
-void ReadYourWritesTransaction::operator=(ReadYourWritesTransaction&& r) noexcept(true) {
+void ReadYourWritesTransaction::operator=(ReadYourWritesTransaction&& r) BOOST_NOEXCEPT {
 	cache = std::move( r.cache );
 	writes = std::move( r.writes );
 	arena = std::move( r.arena );
@@ -1791,6 +1871,7 @@ void ReadYourWritesTransaction::operator=(ReadYourWritesTransaction&& r) noexcep
 	r.resetPromise = Promise<Void>();
 	deferredError = std::move( r.deferredError );
 	retries = r.retries;
+	approximateSize = r.approximateSize;
 	timeoutActor = r.timeoutActor;
 	creationTime = r.creationTime;
 	commitStarted = r.commitStarted;
@@ -1798,14 +1879,16 @@ void ReadYourWritesTransaction::operator=(ReadYourWritesTransaction&& r) noexcep
 	transactionDebugInfo = r.transactionDebugInfo;
 	cache.arena = &arena;
 	writes.arena = &arena;
+	persistentOptions = std::move(r.persistentOptions);
 }
 
-ReadYourWritesTransaction::ReadYourWritesTransaction(ReadYourWritesTransaction&& r) noexcept(true) :
+ReadYourWritesTransaction::ReadYourWritesTransaction(ReadYourWritesTransaction&& r) BOOST_NOEXCEPT :
 	cache( std::move(r.cache) ),
 	writes( std::move(r.writes) ), 
 	arena( std::move(r.arena) ), 
 	reading( std::move(r.reading) ),
 	retries( r.retries ), 
+	approximateSize(r.approximateSize),
 	creationTime( r.creationTime ), 
 	deferredError( std::move(r.deferredError) ), 
 	timeoutActor( std::move(r.timeoutActor) ),
@@ -1820,10 +1903,30 @@ ReadYourWritesTransaction::ReadYourWritesTransaction(ReadYourWritesTransaction&&
 	readConflicts = std::move(r.readConflicts);
 	watchMap = std::move( r.watchMap );
 	r.resetPromise = Promise<Void>();
+	persistentOptions = std::move(r.persistentOptions);
 }
 
 Future<Void> ReadYourWritesTransaction::onError(Error const& e) {
 	return RYWImpl::onError( this, e );
+}
+
+void ReadYourWritesTransaction::applyPersistentOptions() {
+	Optional<StringRef> timeout;
+	for (auto option : persistentOptions) {
+		if(option.first == FDBTransactionOptions::TIMEOUT) {
+			timeout = option.second.castTo<StringRef>();
+		}
+		else {
+			setOptionImpl(option.first, option.second.castTo<StringRef>());
+		}
+	}
+
+	// Setting a timeout can immediately cause a transaction to fail. The only timeout 
+	// that matters is the one most recently set, so we ignore any earlier set timeouts
+	// that might inadvertently fail the transaction.
+	if(timeout.present()) {
+		setOptionImpl(FDBTransactionOptions::TIMEOUT, timeout);
+	}
 }
 
 void ReadYourWritesTransaction::resetRyow() {
@@ -1837,12 +1940,14 @@ void ReadYourWritesTransaction::resetRyow() {
 	readConflicts = CoalescedKeyRefRangeMap<bool>();
 	watchMap.clear();
 	reading = AndFuture();
+	approximateSize = 0;
 	commitStarted = false;
 
 	deferredError = Error();
 
 	if(tr.apiVersionAtLeast(16)) {
 		options.reset(tr);
+		applyPersistentOptions();
 	}
 
 	if ( !oldReset.isSet() )
@@ -1856,9 +1961,14 @@ void ReadYourWritesTransaction::cancel() {
 
 void ReadYourWritesTransaction::reset() {
 	retries = 0;
+	approximateSize = 0;
 	creationTime = now();
+	timeoutActor.cancel();
+	persistentOptions.clear();
+	options.reset(tr);
 	transactionDebugInfo.clear();
 	tr.fullReset();
+	std::copy(tr.getDatabase().getTransactionDefaults().begin(), tr.getDatabase().getTransactionDefaults().end(), std::back_inserter(persistentOptions));
 	resetRyow();
 }
 
@@ -1905,7 +2015,7 @@ void ReadYourWritesTransaction::debugLogRetries(Optional<Error> error) {
 				if(error.present())
 					trace.error(error.get(), true);
 				if(!transactionDebugInfo->transactionName.empty())
-					trace.detail("TransactionName", printable(StringRef(transactionDebugInfo->transactionName)));
+					trace.detail("TransactionName", transactionDebugInfo->transactionName);
 				trace.detail("Elapsed", elapsed).detail("Retries", retries).detail("Committed", committed);
 			}
 			transactionDebugInfo->lastRetryLogTime = now();

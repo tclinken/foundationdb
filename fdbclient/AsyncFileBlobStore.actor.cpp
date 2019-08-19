@@ -21,6 +21,7 @@
 #include "fdbclient/AsyncFileBlobStore.actor.h"
 #include "fdbrpc/AsyncFileReadAhead.actor.h"
 #include "flow/UnitTest.h"
+#include "flow/actorcompiler.h" // has to be last include
 
 Future<int64_t> AsyncFileBlobStoreRead::size() {
 	if(!m_size.isValid())
@@ -38,7 +39,7 @@ ACTOR Future<Void> sendStuff(int id, Reference<IRateControl> t, int bytes) {
 	state double ts = timer();
 	state int total = 0;
 	while(total < bytes) {
-		state int r = std::min<int>(g_random->randomInt(0,1000), bytes - total);
+		state int r = std::min<int>(deterministicRandom()->randomInt(0,1000), bytes - total);
 		wait(t->getAllowance(r));
 		total += r;
 	}

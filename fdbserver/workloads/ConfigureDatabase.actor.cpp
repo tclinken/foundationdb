@@ -18,30 +18,35 @@
  * limitations under the License.
  */
 
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbclient/ManagementAPI.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbclient/ManagementAPI.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbrpc/simulator.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 // "ssd" is an alias to the preferred type which skews the random distribution toward it but that's okay.
-static const char* storeTypes[] = { "ssd", "ssd-1", "ssd-2", "memory" };
+static const char* storeTypes[] = { "ssd", "ssd-1", "ssd-2", "memory", "memory-1", "memory-2" };
+static const char* logTypes[] = {
+	"log_engine:=1", "log_engine:=2",
+	"log_spill:=1", "log_spill:=2",
+	"log_version:=2", "log_version:=3", "log_version:=4"
+};
 static const char* redundancies[] = { "single", "double", "triple" };
 
 std::string generateRegions() {
 	std::string result;
-	if(g_simulator.physicalDatacenters == 1 || (g_simulator.physicalDatacenters == 2 && g_random->random01() < 0.25) || g_simulator.physicalDatacenters == 3) {
+	if(g_simulator.physicalDatacenters == 1 || (g_simulator.physicalDatacenters == 2 && deterministicRandom()->random01() < 0.25) || g_simulator.physicalDatacenters == 3) {
 		return " usable_regions=1 regions=\"\"";
 	}
 
-	if(g_random->random01() < 0.25) {
-		return format(" usable_regions=%d", g_random->randomInt(1,3));
+	if(deterministicRandom()->random01() < 0.25) {
+		return format(" usable_regions=%d", deterministicRandom()->randomInt(1,3));
 	}
 
 	int primaryPriority = 1;
 	int remotePriority = -1;
-	double priorityType = g_random->random01();
+	double priorityType = deterministicRandom()->random01();
 	if(priorityType < 0.1) {
 		primaryPriority = -1;
 		remotePriority = 1;
@@ -64,7 +69,7 @@ std::string generateRegions() {
 	StatusArray remoteDcArr;
 	remoteDcArr.push_back(remoteDcObj);
 
-	if(g_simulator.physicalDatacenters > 3 && g_random->random01() < 0.5) {
+	if(g_simulator.physicalDatacenters > 3 && deterministicRandom()->random01() < 0.5) {
 		StatusObject primarySatelliteObj;
 		primarySatelliteObj["id"] = "2";
 		primarySatelliteObj["priority"] = 1;
@@ -77,7 +82,7 @@ std::string generateRegions() {
 		remoteSatelliteObj["satellite"] = 1;
 		remoteDcArr.push_back(remoteSatelliteObj);
 
-		if(g_simulator.physicalDatacenters > 5 && g_random->random01() < 0.5) {
+		if(g_simulator.physicalDatacenters > 5 && deterministicRandom()->random01() < 0.5) {
 			StatusObject primarySatelliteObjB;
 			primarySatelliteObjB["id"] = "4";
 			primarySatelliteObjB["priority"] = 1;
@@ -90,7 +95,7 @@ std::string generateRegions() {
 			remoteSatelliteObjB["satellite"] = 1;
 			remoteDcArr.push_back(remoteSatelliteObjB);
 
-			int satellite_replication_type = g_random->randomInt(0,3);
+			int satellite_replication_type = deterministicRandom()->randomInt(0,3);
 			switch (satellite_replication_type) {
 			case 0: {
 				TEST( true );  // Simulated cluster using no satellite redundancy mode
@@ -112,7 +117,7 @@ std::string generateRegions() {
 				ASSERT(false);  // Programmer forgot to adjust cases.
 			}
 		} else {
-			int satellite_replication_type = g_random->randomInt(0,4);
+			int satellite_replication_type = deterministicRandom()->randomInt(0,4);
 			switch (satellite_replication_type) {
 			case 0: {
 				//FIXME: implement
@@ -140,13 +145,13 @@ std::string generateRegions() {
 			}
 		}
 
-		if (g_random->random01() < 0.25) {
-			int logs = g_random->randomInt(1,7);
+		if (deterministicRandom()->random01() < 0.25) {
+			int logs = deterministicRandom()->randomInt(1,7);
 			primaryObj["satellite_logs"] = logs;
 			remoteObj["satellite_logs"] = logs;
 		}
 
-		int remote_replication_type = g_random->randomInt(0, 4);
+		int remote_replication_type = deterministicRandom()->randomInt(0, 4);
 		switch (remote_replication_type) {
 		case 0: {
 			//FIXME: implement
@@ -171,8 +176,8 @@ std::string generateRegions() {
 			ASSERT(false);  // Programmer forgot to adjust cases.
 		}
 
-		result += format(" log_routers=%d", g_random->randomInt(1,7));
-		result += format(" remote_logs=%d", g_random->randomInt(1,7));
+		result += format(" log_routers=%d", deterministicRandom()->randomInt(1,7));
+		result += format(" remote_logs=%d", deterministicRandom()->randomInt(1,7));
 	}
 
 	primaryObj["datacenters"] = primaryDcArr;
@@ -181,10 +186,10 @@ std::string generateRegions() {
 	StatusArray regionArr;
 	regionArr.push_back(primaryObj);
 
-	if(g_random->random01() < 0.8) {
+	if(deterministicRandom()->random01() < 0.8) {
 		regionArr.push_back(remoteObj);
-		if(g_random->random01() < 0.25) {
-			result += format(" usable_regions=%d", g_random->randomInt(1,3));
+		if(deterministicRandom()->random01() < 0.25) {
+			result += format(" usable_regions=%d", deterministicRandom()->randomInt(1,3));
 		}
 	}
 
@@ -235,8 +240,13 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 		return StringRef(format("DestroyDB%d", dbIndex));
 	}
 
+	static Future<ConfigurationResult::Type> IssueConfigurationChange( Database cx, const std::string& config, bool force ) {
+		printf("Issuing configuration change: %s\n", config.c_str());
+		return changeConfig(cx, config, force);
+	}
+
 	ACTOR Future<Void> _setup( Database cx, ConfigureDatabaseWorkload *self ) {
-		ConfigurationResult::Type _ = wait( changeConfig( cx, "single", true ) );
+		wait(success( changeConfig( cx, "single", true ) ));
 		return Void();
 	}
 
@@ -249,21 +259,20 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 	}
 
 	static int randomRoleNumber() {
-		int i = g_random->randomInt(0,4);
+		int i = deterministicRandom()->randomInt(0,4);
 		return i ? i : -1;
 	}
 
 	ACTOR Future<Void> singleDB( ConfigureDatabaseWorkload *self, Database cx ) {
 		state Transaction tr;
 		state int i;
-		state bool firstFearless = false;
 		loop {
 			if(g_simulator.speedUpSimulation) {
 				return Void();
 			}
-			state int randomChoice = g_random->randomInt(0, 6);
+			state int randomChoice = deterministicRandom()->randomInt(0, 7);
 			if( randomChoice == 0 ) {
-				double waitDuration = 3.0 * g_random->random01();
+				double waitDuration = 3.0 * deterministicRandom()->random01();
 				//TraceEvent("ConfigureTestWaitAfter").detail("WaitDuration",waitDuration);
 				wait( delay( waitDuration ) );
 			}
@@ -280,7 +289,7 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 				}
 			}
 			else if( randomChoice == 2 ) {
-				state double loadDuration = g_random->random01() * 10.0;
+				state double loadDuration = deterministicRandom()->random01() * 10.0;
 				state double startTime = now();
 				state int amtLoaded = 0;
 
@@ -291,7 +300,7 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 						tr = Transaction( cx );
 						try {
 							for( i = 0; i < 10; i++ ) {
-								state Key randomKey( "ConfigureTest" + g_random->randomUniqueID().toString() );
+								state Key randomKey( "ConfigureTest" + deterministicRandom()->randomUniqueID().toString() );
 								Optional<Value> val = wait( tr.get( randomKey ) );
 								uint64_t nextVal = val.present() ? valueToUInt64( val.get() ) + 1 : 0;
 								tr.set( randomKey, format( "%016llx", nextVal ) );
@@ -316,7 +325,7 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 				if(g_simulator.physicalDatacenters == 2 || g_simulator.physicalDatacenters > 3) {
 					maxRedundancies--; //There are not enough machines for triple replication in fearless configurations
 				}
-				int redundancy = g_random->randomInt(0, maxRedundancies);
+				int redundancy = deterministicRandom()->randomInt(0, maxRedundancies);
 				std::string config = redundancies[redundancy];
 
 				if(config == "triple" && g_simulator.physicalDatacenters == 3) {
@@ -325,24 +334,28 @@ struct ConfigureDatabaseWorkload : TestWorkload {
 
 				config += generateRegions();
 
-				if (g_random->random01() < 0.5) config += " logs=" + format("%d", randomRoleNumber());
-				if (g_random->random01() < 0.5) config += " proxies=" + format("%d", randomRoleNumber());
-				if (g_random->random01() < 0.5) config += " resolvers=" + format("%d", randomRoleNumber());
+				if (deterministicRandom()->random01() < 0.5) config += " logs=" + format("%d", randomRoleNumber());
+				if (deterministicRandom()->random01() < 0.5) config += " proxies=" + format("%d", randomRoleNumber());
+				if (deterministicRandom()->random01() < 0.5) config += " resolvers=" + format("%d", randomRoleNumber());
 
-				ConfigurationResult::Type _ = wait( changeConfig( cx, config, false ) );
+				wait(success( IssueConfigurationChange( cx, config, false ) ));
 
 				//TraceEvent("ConfigureTestConfigureEnd").detail("NewConfig", newConfig);
 			}
 			else if( randomChoice == 4 ) {
 				//TraceEvent("ConfigureTestQuorumBegin").detail("NewQuorum", s);
 				auto ch = autoQuorumChange();
-				if (g_random->randomInt(0,2))
-					ch = nameQuorumChange( format("NewName%d", g_random->randomInt(0,100)), ch );
-				CoordinatorsResult::Type _ = wait( changeQuorum( cx, ch ) );
+				if (deterministicRandom()->randomInt(0,2))
+					ch = nameQuorumChange( format("NewName%d", deterministicRandom()->randomInt(0,100)), ch );
+				wait(success( changeQuorum( cx, ch ) ));
 				//TraceEvent("ConfigureTestConfigureEnd").detail("NewQuorum", s);
 			}
 			else if ( randomChoice == 5) {
-				ConfigurationResult::Type _ = wait( changeConfig( cx, storeTypes[g_random->randomInt( 0, sizeof(storeTypes)/sizeof(storeTypes[0]))], true ) );
+				wait(success( IssueConfigurationChange( cx, storeTypes[deterministicRandom()->randomInt( 0, sizeof(storeTypes)/sizeof(storeTypes[0]))], true ) ));
+			}
+			else if ( randomChoice == 6 ) {
+				// Some configurations will be invalid, and that's fine.
+				wait(success( IssueConfigurationChange( cx, logTypes[deterministicRandom()->randomInt( 0, sizeof(logTypes)/sizeof(logTypes[0]))], false ) ));
 			}
 			else {
 				ASSERT(false);

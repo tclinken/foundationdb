@@ -19,10 +19,10 @@
  */
 
 #include "flow/ActorCollection.h"
-#include "fdbclient/NativeAPI.h"
+#include "fdbclient/NativeAPI.actor.h"
 #include "fdbserver/ResolverInterface.h"
 #include "fdbserver/MasterInterface.h"
-#include "fdbserver/WorkerInterface.h"
+#include "fdbserver/WorkerInterface.actor.h"
 #include "fdbserver/WaitFailure.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/ServerDBInfo.h"
@@ -75,11 +75,11 @@ ACTOR Future<Void> resolveBatch(
 	state Optional<UID> debugID;
 
 	// The first request (prevVersion < 0) comes from the master
-	state NetworkAddress proxyAddress = req.prevVersion >= 0 ? req.reply.getEndpoint().address : NetworkAddress();
+	state NetworkAddress proxyAddress = req.prevVersion >= 0 ? req.reply.getEndpoint().getPrimaryAddress() : NetworkAddress();
 	state ProxyRequestsInfo &proxyInfo = self->proxyInfoMap[proxyAddress];
 
 	if(req.debugID.present()) {
-		debugID = g_nondeterministic_random->randomUniqueID();
+		debugID = nondeterministicRandom()->randomUniqueID();
 		g_traceBatch.addAttach("CommitAttachID", req.debugID.get().first(), debugID.get().first());
 		g_traceBatch.addEvent("CommitDebug",debugID.get().first(),"Resolver.resolveBatch.Before");
 	}
@@ -114,9 +114,9 @@ ACTOR Future<Void> resolveBatch(
 		}
 	}
 
-	if (check_yield(TaskDefaultEndpoint)) {
-		wait( delay( 0, TaskLowPriority ) || delay( SERVER_KNOBS->COMMIT_SLEEP_TIME ) );  // FIXME: Is this still right?
-		g_network->setCurrentTask(TaskDefaultEndpoint);
+	if (check_yield(TaskPriority::DefaultEndpoint)) {
+		wait( delay( 0, TaskPriority::Low ) || delay( SERVER_KNOBS->COMMIT_SLEEP_TIME ) );  // FIXME: Is this still right?
+		g_network->setCurrentTask(TaskPriority::DefaultEndpoint);
 	}
 
 	if (self->version.get() == req.prevVersion) {  // Not a duplicate (check relies on no waiting between here and self->version.set() below!)
@@ -132,7 +132,6 @@ ACTOR Future<Void> resolveBatch(
 		
 		vector<int> commitList;
 		vector<int> tooOldList;
-		double commitTime = now();
 
 		// Detect conflicts
 		double expire = now() + SERVER_KNOBS->SAMPLE_EXPIRATION_TIME;

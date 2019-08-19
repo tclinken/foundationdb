@@ -19,10 +19,10 @@
  */
 
 #include "flow/ActorCollection.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
-#include "fdbserver/WorkerInterface.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
+#include "fdbserver/WorkerInterface.actor.h"
 #include "fdbserver/QuietDatabase.h"
 #include "fdbserver/ServerDBInfo.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
@@ -103,7 +103,7 @@ struct PingWorkload : TestWorkload {
 	ACTOR Future<Void> persistInterface( PingWorkload *self, Database cx ) {
 		state Transaction tr(cx);
 		BinaryWriter wr(IncludeVersion()); wr << self->interf;
-		state Standalone<StringRef> serializedInterface = wr.toStringRef();
+		state Standalone<StringRef> serializedInterface = wr.toValue();
 		loop {
 			try {
 				Optional<Value> val = wait( tr.get( StringRef( format("Ping/Client/%d", self->clientId) ) ) );
@@ -149,12 +149,12 @@ struct PingWorkload : TestWorkload {
 
 		loop {
 			wait( poisson( &lastTime, self->actorCount / self->operationsPerSecond ) );
-			auto& peer = g_random->randomChoice(peers);
-			state NetworkAddress addr = peer.getEndpoint().address;
+			auto& peer = deterministicRandom()->randomChoice(peers);
+			state NetworkAddress addr = peer.getEndpoint().getPrimaryAddress();
 			state double before = now();
 
 			LoadedPingRequest req;
-			req.id = g_random->randomUniqueID();
+			req.id = deterministicRandom()->randomUniqueID();
 			req.payload = self->usePayload ? self->payloadOut : LiteralStringRef("");
 			req.loadReply = self->usePayload;
 			LoadedReply rep = wait( peer.getReply( req ) );
@@ -180,10 +180,10 @@ struct PingWorkload : TestWorkload {
 	}
 
 	ACTOR Future<Void> workerPinger( PingWorkload* self ) {
-		vector<std::pair<WorkerInterface, ProcessClass>> workers = wait( getWorkers( self->dbInfo ) );
+		vector<WorkerDetails> workers = wait( getWorkers( self->dbInfo ) );
 		vector<RequestStream<LoadedPingRequest>> peers;
 		for(int i=0; i<workers.size(); i++)
-			peers.push_back( workers[i].first.debugPing );
+			peers.push_back( workers[i].interf.debugPing );
 		vector<Future<Void>> pingers;
 		for(int i=0; i<self->actorCount; i++)
 			pingers.push_back( self->pinger( self, peers ) );
@@ -192,7 +192,7 @@ struct PingWorkload : TestWorkload {
 	}
 
 	// ACTOR Future<Void> poisson_spin( double *last, double meanInterval ) {
-	// 	*last += meanInterval*-log( g_random->random01() );
+	// 	*last += meanInterval*-log( deterministicRandom()->random01() );
 	// 	wait( delay( std::max( *last - timer() - 0.01, 0.0 ) ) );
 	// 	if( timer() >= *last )
 	// 		TraceEvent(SevWarnAlways, "SpinPoissonInaccurateTime").detail("Diff", timer() - *last);
@@ -208,9 +208,9 @@ struct PingWorkload : TestWorkload {
 		state Future<Void> collection = actorCollection( addActor.getFuture() );
 
 		if( self->workerBroadcast ) {
-			vector<std::pair<WorkerInterface, ProcessClass>> workers = wait( getWorkers( self->dbInfo ) );
+			vector<WorkerDetails> workers = wait( getWorkers( self->dbInfo ) );
 			for( int i=0; i<workers.size(); i++ )
-				endpoints.push_back( workers[i].first.debugPing );
+				endpoints.push_back( workers[i].interf.debugPing );
 		} else {
 			vector<PingWorkloadInterface> peers = wait( self->fetchInterfaces( self, cx ) );
 			for( int i=0; i<peers.size(); i++ )
@@ -225,25 +225,24 @@ struct PingWorkload : TestWorkload {
 	}
 
 	// ACTOR Future<Void> receptionLogger( PingWorkload* self, Future<PingReply> done, NetworkAddress to, UID id ) {
-	// 	PingReply _ = wait( done );
+	// 	wait(success( done ));
 	// 	if( now() > self->testStart + 29 && now() < self->testStart + 31 )
 	// 		TraceEvent("PayloadReplyReceived", id).detail("To", to);
 	// 	return Void();
 	// }
 
 	// ACTOR Future<Void> payloadDelayer( PingRequest req, PromiseStream<PingRequest> stream ) {
-	// 	wait( delay( g_random->random01() * 0.100 ) );
+	// 	wait( delay( deterministicRandom()->random01() * 0.100 ) );
 	// 	PingReply rep = wait( stream.getReply( req ) );
 	// 	return Void();
 	// }
 
 	ACTOR Future<Void> payloadPinger(PingWorkload* self, Database cx, vector<RequestStream<LoadedPingRequest>> peers) {
 		// state vector<PingWorkloadInterface> peers = wait( self->fetchInterfaces( self, cx ) );
-		state double lastTime = now();
 
 		// loop {
 			state double start = now();
-			state UID pingId( g_random->randomUniqueID() );
+			state UID pingId( deterministicRandom()->randomUniqueID() );
 			vector<Future<Void>> replies;
 			for(int i=0; i<peers.size(); i++) {
 				LoadedPingRequest req;
@@ -251,7 +250,7 @@ struct PingWorkload : TestWorkload {
 				req.payload = self->payloadOut;
 				req.loadReply = true;
 				replies.push_back( success( peers[i].getReply( req ) ) );
-				// replies.push_back( self->receptionLogger( self, peers[i].payloadPing.getReply( req ), peers[i].payloadPing.getEndpoint().address, pingId ) );
+				// replies.push_back( self->receptionLogger( self, peers[i].payloadPing.getReply( req ), peers[i].payloadPing.getEndpoint().getPrimaryAddress(), pingId ) );
 				// peers[i].payloadPing.send( req );
 				// replies.push_back( self->payloadDelayer( req, peers[i].payloadPing ) );
 			}
@@ -259,13 +258,13 @@ struct PingWorkload : TestWorkload {
 			wait( waitForAll( replies ) );
 			double elapsed = now() - start;
 			TraceEvent("PayloadPingDone", pingId).detail("Elapsed", elapsed);
-		// 	wait( delay( g_random->random01() / 100 ) );
+		// 	wait( delay( deterministicRandom()->random01() / 100 ) );
 		// }
 		return Void();
 	}
 
 	// ACTOR Future<Void> packetPonger( PingWorkload* self, LoadedPingRequest req ) {
-	// 	wait( delay( g_random->random01() * 0.100 ) );
+	// 	wait( delay( deterministicRandom()->random01() * 0.100 ) );
 		
 	// 	LoadedReply rep;
 	// 	rep.id = req.id;
@@ -281,7 +280,7 @@ struct PingWorkload : TestWorkload {
 
 		loop {
 			LoadedPingRequest req = waitNext( self->interf.payloadPing.getFuture() );
-			// double end = timer() + (g_random->random01() / 200);
+			// double end = timer() + (deterministicRandom()->random01() / 200);
 			// while( timer() < end )
 			// 	_mm_pause();
 

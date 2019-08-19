@@ -18,18 +18,20 @@
  * limitations under the License.
  */
 
+#include <math.h>
+
 #include "flow/IRandom.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbrpc/IRateControl.h"
 #include "fdbrpc/simulator.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/StorageMetrics.h"
-#include "fdbserver/DataDistribution.h"
+#include "fdbserver/DataDistribution.actor.h"
 #include "fdbserver/QuietDatabase.h"
 #include "flow/DeterministicRandom.h"
-#include "fdbclient/ManagementAPI.h"
+#include "fdbclient/ManagementAPI.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 struct ConsistencyCheckWorkload : TestWorkload
@@ -56,8 +58,11 @@ struct ConsistencyCheckWorkload : TestWorkload
 	//If true, then any failure of the consistency check will be logged as SevError.  Otherwise, it will be logged as SevWarn
 	bool failureIsError;
 
-	//Ideal number of bytes per second to read from each storage server
-	int rateLimit;
+	//Max number of bytes per second to read from each storage server
+	int rateLimitMax;
+
+	// DataSet Size
+	int64_t bytesReadInPreviousRound;
 
 	//Randomize shard order with each iteration if true
 	bool shuffleShards;
@@ -70,6 +75,11 @@ struct ConsistencyCheckWorkload : TestWorkload
 	//Whether to continuously perfom the consistency check
 	bool indefinite;
 
+	// Whether to suspendConsistencyCheck
+	AsyncVar<bool> suspendConsistencyCheck;
+
+	Future<Void> monitorConsistencyCheckSettingsActor;
+
 	ConsistencyCheckWorkload(WorkloadContext const& wcx)
 		: TestWorkload(wcx)
 	{
@@ -78,15 +88,17 @@ struct ConsistencyCheckWorkload : TestWorkload
 		distributed = getOption(options, LiteralStringRef("distributed"), true);
 		shardSampleFactor = std::max(getOption(options, LiteralStringRef("shardSampleFactor"), 1), 1);
 		failureIsError = getOption(options, LiteralStringRef("failureIsError"), false);
-		rateLimit = getOption(options, LiteralStringRef("rateLimit"), 0);
+		rateLimitMax = getOption(options, LiteralStringRef("rateLimitMax"), 0);
 		shuffleShards = getOption(options, LiteralStringRef("shuffleShards"), false);
 		indefinite = getOption(options, LiteralStringRef("indefinite"), false);
+		suspendConsistencyCheck.set(true);
 
 		success = true;
 
 		firstClient = clientId == 0;
 
 		repetitions = 0;
+		bytesReadInPreviousRound = 0;
 	}
 
 	virtual std::string description()
@@ -108,18 +120,17 @@ struct ConsistencyCheckWorkload : TestWorkload
 				wait( timeKeeperSetDisable(cx) );
 			}
 
-			try
-			{
+			try {
 				wait(timeoutError(quietDatabase(cx, self->dbInfo, "ConsistencyCheckStart", 0, 1e5, 0, 0), self->quiescentWaitTimeout));  // FIXME: should be zero?
 			}
-			catch(Error& e)
-			{
+			catch (Error& e) {
 				TraceEvent("ConsistencyCheck_QuietDatabaseError").error(e);
 				self->testFailure("Unable to achieve a quiet database");
 				self->performQuiescentChecks = false;
 			}
 		}
 
+		self->monitorConsistencyCheckSettingsActor = self->monitorConsistencyCheckSettings(cx, self);
 		return Void();
 	}
 
@@ -152,14 +163,43 @@ struct ConsistencyCheckWorkload : TestWorkload
 		failEvent.detail("Reason", "Consistency check: " + message);
 	}
 
+	ACTOR Future<Void> monitorConsistencyCheckSettings(Database cx, ConsistencyCheckWorkload *self) {
+		loop {
+			state ReadYourWritesTransaction tr(cx);
+			try {
+				tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+				tr.setOption(FDBTransactionOptions::PRIORITY_SYSTEM_IMMEDIATE);
+				tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+				state Optional<Value> ccSuspendVal = wait(tr.get(fdbShouldConsistencyCheckBeSuspended));
+				bool ccSuspend = ccSuspendVal.present() ? BinaryReader::fromStringRef<bool>(ccSuspendVal.get(), Unversioned()) : false;
+				self->suspendConsistencyCheck.set(ccSuspend);
+				state Future<Void> watchCCSuspendFuture = tr.watch(fdbShouldConsistencyCheckBeSuspended);
+				wait(tr.commit());
+				wait(watchCCSuspendFuture);
+			}
+			catch (Error &e) {
+				wait(tr.onError(e));
+			}
+		}
+	}
+
 	ACTOR Future<Void> _start(Database cx, ConsistencyCheckWorkload *self)
 	{
 		loop {
-			wait(self->runCheck(cx, self));
-			if(!self->indefinite)
-				break;
-			self->repetitions++;
-			wait(delay(5.0));
+			while(self->suspendConsistencyCheck.get()) {
+				TraceEvent("ConsistencyCheck_Suspended");
+				wait(self->suspendConsistencyCheck.onChange());
+			}
+			TraceEvent("ConsistencyCheck_StartingOrResuming");
+			choose {
+				when(wait(self->runCheck(cx, self))) { 
+					if(!self->indefinite)
+						break;
+					self->repetitions++;
+					wait(delay(5.0));
+				}
+				when(wait(self->suspendConsistencyCheck.onChange())) { }
+			}
 		}
 		return Void();
 	}
@@ -206,12 +246,26 @@ struct ConsistencyCheckWorkload : TestWorkload
 						self->testFailure("Non-zero data distribution queue/in-flight size");
 					}
 
+					// Check that the number of process (and machine) teams is no larger than
+					// the allowed maximum number of teams
+					bool teamCollectionValid = wait(getTeamCollectionValid(cx, self->dbInfo));
+					if (!teamCollectionValid) {
+						TraceEvent(SevError, "ConsistencyCheck_TooManyTeams");
+						self->testFailure("The number of process or machine teams is larger than the allowed maximum number of teams");
+					}
+
 					//Check that nothing is in the TLog queues
-					int64_t maxTLogQueueSize = wait(getMaxTLogQueueSize(cx, self->dbInfo));
-					if(maxTLogQueueSize > 1e5)  // FIXME: Should be zero?
+					std::pair<int64_t,int64_t> maxTLogQueueInfo = wait(getTLogQueueInfo(cx, self->dbInfo));
+					if(maxTLogQueueInfo.first > 1e5)  // FIXME: Should be zero?
 					{
-						TraceEvent("ConsistencyCheck_NonZeroTLogQueue").detail("MaxQueueSize", maxTLogQueueSize);
+						TraceEvent("ConsistencyCheck_NonZeroTLogQueue").detail("MaxQueueSize", maxTLogQueueInfo.first);
 						self->testFailure("Non-zero tlog queue size");
+					}
+
+					if(maxTLogQueueInfo.second > 30e6)
+					{
+						TraceEvent("ConsistencyCheck_PoppedVersionLag").detail("PoppedVersionLag", maxTLogQueueInfo.second);
+						self->testFailure("large popped version lag");
 					}
 
 					//Check that nothing is in the storage server queues
@@ -238,8 +292,8 @@ struct ConsistencyCheckWorkload : TestWorkload
 							throw;
 					}
 
-					bool hasStorage = wait( self->checkForStorage(cx, configuration, self) );
-					bool hasExtraStores = wait( self->checkForExtraDataStores(cx, self) );
+					wait(::success(self->checkForStorage(cx, configuration, self)));
+					wait(::success(self->checkForExtraDataStores(cx, self)));
 
 					//Check that each machine is operating as its desired class
 					bool usingDesiredClasses = wait(self->checkUsingDesiredClasses(cx, self));
@@ -249,14 +303,18 @@ struct ConsistencyCheckWorkload : TestWorkload
 					bool workerListCorrect = wait( self->checkWorkerList(cx, self) );
 					if(!workerListCorrect)
 						self->testFailure("Worker list incorrect");
+
+					bool coordinatorsCorrect = wait( self->checkCoordinators(cx) );
+					if(!coordinatorsCorrect)
+						self->testFailure("Coordinators incorrect");
 				}
 
 				//Get a list of key servers; verify that the TLogs and master all agree about who the key servers are
-				state Promise<vector<pair<KeyRange, vector<StorageServerInterface>>>> keyServerPromise;
+				state Promise<std::vector<std::pair<KeyRange, std::vector<StorageServerInterface>>>> keyServerPromise;
 				bool keyServerResult = wait(self->getKeyServers(cx, self, keyServerPromise));
 				if(keyServerResult)
 				{
-					state vector<pair<KeyRange, vector<StorageServerInterface>>> keyServers = keyServerPromise.getFuture().get();
+					state std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> keyServers = keyServerPromise.getFuture().get();
 
 					//Get the locations of all the shards in the database
 					state Promise<Standalone<VectorRef<KeyValueRef>>> keyLocationPromise;
@@ -266,13 +324,14 @@ struct ConsistencyCheckWorkload : TestWorkload
 						state Standalone<VectorRef<KeyValueRef>> keyLocations = keyLocationPromise.getFuture().get();
 
 						//Check that each shard has the same data on all storage servers that it resides on
-						bool dataConsistencyResult = wait(self->checkDataConsistency(cx, keyLocations, configuration, self));
+						wait(::success(self->checkDataConsistency(cx, keyLocations, configuration, self)));
 					}
 				}
 			}
 			catch(Error &e)
 			{
-				if(e.code() == error_code_transaction_too_old || e.code() == error_code_future_version || e.code() == error_code_wrong_shard_server || e.code() == error_code_all_alternatives_failed || e.code() == error_code_server_request_queue_full)
+				if (e.code() == error_code_transaction_too_old || e.code() == error_code_future_version ||
+				    e.code() == error_code_wrong_shard_server || e.code() == error_code_all_alternatives_failed || e.code() == error_code_process_behind)
 					TraceEvent("ConsistencyCheck_Retry").error(e); // FIXME: consistency check does not retry in this case
 				else
 					self->testFailure(format("Error %d - %s", e.code(), e.name()));
@@ -298,7 +357,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 			}
 			catch(Error &e)
 			{
-				tr.onError(e);
+				wait(tr.onError(e));
 			}
 		}
 	}
@@ -306,9 +365,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 	//Get a list of storage servers from the master and compares them with the TLogs.
 	//If this is a quiescent check, then each master proxy needs to respond, otherwise only one needs to respond.
 	//Returns false if there is a failure (in this case, keyServersPromise will never be set)
-	ACTOR Future<bool> getKeyServers(Database cx, ConsistencyCheckWorkload *self, Promise<vector<pair<KeyRange, vector<StorageServerInterface>>>> keyServersPromise)
+	ACTOR Future<bool> getKeyServers(Database cx, ConsistencyCheckWorkload *self, Promise<std::vector<std::pair<KeyRange, vector<StorageServerInterface>>>> keyServersPromise)
 	{
-		state vector<pair<KeyRange, vector<StorageServerInterface>>> keyServers;
+		state std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> keyServers;
 
 		//Try getting key server locations from the master proxies
 		state vector<Future<ErrorOr<GetKeyServerLocationsReply>>> keyServerLocationFutures;
@@ -317,7 +376,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 		state int limitKeyServers = BUGGIFY ? 1 : 100;
 
 		while (begin < end) {
-			state Reference<ProxyInfo> proxyInfo = wait(cx->getMasterProxiesFuture());
+			state Reference<ProxyInfo> proxyInfo = wait(cx->getMasterProxiesFuture(false));
 			keyServerLocationFutures.clear();
 			for (int i = 0; i < proxyInfo->size(); i++)
 				keyServerLocationFutures.push_back(proxyInfo->get(i, &MasterProxyInterface::getKeyServersLocations).getReplyUnlessFailedFor(GetKeyServerLocationsRequest(begin, end, limitKeyServers, false, Arena()), 2, 0));
@@ -349,11 +408,11 @@ struct ConsistencyCheckWorkload : TestWorkload
 							if (!self->performQuiescentChecks)
 								break;
 						}
-					} // End of For	
+					} // End of For
 				}
 				when(wait(cx->onMasterProxiesChanged())) { }
-			} // End of choose		
-			
+			} // End of choose
+
 			if (!keyServersInsertedForThisIteration) // Retry the entire workflow
 				wait(delay(1.0));
 
@@ -365,20 +424,18 @@ struct ConsistencyCheckWorkload : TestWorkload
 
 	//Retrieves the locations of all shards in the database
 	//Returns false if there is a failure (in this case, keyLocationPromise will never be set)
-	ACTOR Future<bool> getKeyLocations(Database cx, vector<pair<KeyRange, vector<StorageServerInterface>>> shards, ConsistencyCheckWorkload *self, Promise<Standalone<VectorRef<KeyValueRef>>> keyLocationPromise)
+	ACTOR Future<bool> getKeyLocations(Database cx, std::vector<std::pair<KeyRange, vector<StorageServerInterface>>> shards, ConsistencyCheckWorkload *self, Promise<Standalone<VectorRef<KeyValueRef>>> keyLocationPromise)
 	{
 		state Standalone<VectorRef<KeyValueRef>> keyLocations;
 		state Key beginKey = allKeys.begin.withPrefix(keyServersPrefix);
 		state Key endKey = allKeys.end.withPrefix(keyServersPrefix);
 		state int i = 0;
+		state Transaction onErrorTr(cx); // This transaction exists only to access onError and its backoff behavior
 
 		//If the responses are too big, we may use multiple requests to get the key locations.  Each request begins where the last left off
-		for ( ; i < shards.size(); i++)
-		{
-			while(beginKey < std::min<KeyRef>(shards[i].first.end, endKey))
-			{
-				try
-				{
+		for ( ; i < shards.size(); i++) {
+			while (beginKey < std::min<KeyRef>(shards[i].first.end, endKey)) {
+				try {
 					Version version = wait(self->getVersion(cx, self));
 
 					GetKeyValuesRequest req;
@@ -390,10 +447,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 
 					//Try getting the shard locations from the key servers
 					state vector<Future<ErrorOr<GetKeyValuesReply>>> keyValueFutures;
-					for(int j = 0; j < shards[i].second.size(); j++)
-					{
+					for (const auto& kv : shards[i].second) {
 						resetReply(req);
-						keyValueFutures.push_back(shards[i].second[j].getKeyValues.getReplyUnlessFailedFor(req, 2, 0));
+						keyValueFutures.push_back(kv.getKeyValues.getReplyUnlessFailedFor(req, 2, 0));
 					}
 
 					wait(waitForAll(keyValueFutures));
@@ -401,15 +457,12 @@ struct ConsistencyCheckWorkload : TestWorkload
 					int firstValidStorageServer = -1;
 
 					//Read the shard location results
-					for(int j = 0; j < keyValueFutures.size(); j++)
-					{
+					for (int j = 0; j < keyValueFutures.size(); j++) {
 						ErrorOr<GetKeyValuesReply> reply = keyValueFutures[j].get();
 
-						if(!reply.present())
-						{
+						if (!reply.present() || reply.get().error.present()) {
 							//If the storage server didn't reply in a quiescent database, then the check fails
-							if(self->performQuiescentChecks)
-							{
+							if(self->performQuiescentChecks) {
 								TraceEvent("ConsistencyCheck_KeyServerUnavailable").detail("StorageServer", shards[i].second[j].id().toString().c_str());
 								self->testFailure("Key server unavailable");
 								return false;
@@ -421,12 +474,11 @@ struct ConsistencyCheckWorkload : TestWorkload
 						}
 
 						//If this is the first storage server, store the locations to send back to the caller
-						else if(firstValidStorageServer < 0)
+						else if(firstValidStorageServer < 0) {
 							firstValidStorageServer = j;
 
 						//Otherwise, compare the data to the results from the first storage server.  If they are different, then the check fails
-						else if(reply.get().data != keyValueFutures[firstValidStorageServer].get().get().data || reply.get().more != keyValueFutures[firstValidStorageServer].get().get().more)
-						{
+						} else if(reply.get().data != keyValueFutures[firstValidStorageServer].get().get().data || reply.get().more != keyValueFutures[firstValidStorageServer].get().get().more) {
 							TraceEvent("ConsistencyCheck_InconsistentKeyServers").detail("StorageServer1", shards[i].second[firstValidStorageServer].id())
 								.detail("StorageServer2", shards[i].second[j].id());
 							self->testFailure("Key servers inconsistent", true);
@@ -457,13 +509,10 @@ struct ConsistencyCheckWorkload : TestWorkload
 					if(beginKey >= endKey)
 						keyLocations.push_back_deep(keyLocations.arena(), currentLocations.end()[-1]);
 				}
-				catch(Error &e)
-				{
-					//If we failed because of a version problem, then retry
-					if(e.code() == error_code_transaction_too_old || e.code() == error_code_future_version || e.code() == error_code_transaction_too_old)
-						TraceEvent("ConsistencyCheck_RetryGetKeyLocations").error(e);
-					else
-						throw;
+				catch (Error& e) {
+					state Error err = e;
+					wait(onErrorTr.onError(err));
+					TraceEvent("ConsistencyCheck_RetryGetKeyLocations").error(err);
 				}
 			}
 		}
@@ -573,7 +622,13 @@ struct ConsistencyCheckWorkload : TestWorkload
 		state int effectiveClientCount = (self->distributed) ? self->clientCount : 1;
 		state int i = self->clientId * (self->shardSampleFactor + 1);
 		state int increment = (self->distributed && !self->firstClient) ? effectiveClientCount * self->shardSampleFactor : 1;
-		state Reference<IRateControl> rateLimiter = Reference<IRateControl>( new SpeedLimit(self->rateLimit, CLIENT_KNOBS->CONSISTENCY_CHECK_RATE_WINDOW) );
+		state int rateLimitForThisRound = self->bytesReadInPreviousRound == 0 ? self->rateLimitMax :
+			std::min(self->rateLimitMax, static_cast<int>(ceil(self->bytesReadInPreviousRound / (float) CLIENT_KNOBS->CONSISTENCY_CHECK_ONE_ROUND_TARGET_COMPLETION_TIME)));
+		ASSERT(rateLimitForThisRound >= 0 && rateLimitForThisRound <= self->rateLimitMax);
+		TraceEvent("ConsistencyCheck_RateLimitForThisRound").detail("RateLimit", rateLimitForThisRound);
+		state Reference<IRateControl> rateLimiter = Reference<IRateControl>( new SpeedLimit(rateLimitForThisRound, 1) );
+		state double rateLimiterStartTime = now();
+		state int64_t bytesReadInthisRound = 0;
 
 		state double dbSize = 100e12;
 		if(g_network->isSimulated()) {
@@ -694,6 +749,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 				state int splitBytes = 0;
 				state int firstKeySampledBytes = 0;
 				state int sampledKeys = 0;
+				state int sampledKeysWithProb = 0;
 				state double shardVariance = 0;
 				state bool canSplit = false;
 				state Key lastSampleKey;
@@ -701,6 +757,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 				state int64_t totalReadAmount = 0;
 
 				state KeySelector begin = firstGreaterOrEqual(range.begin);
+				state Transaction onErrorTr(cx); // This transaction exists only to access onError and its backoff behavior
 
 				//Read a limited number of entries at a time, repeating until all keys in the shard have been read
 				loop
@@ -738,7 +795,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 							ErrorOr<GetKeyValuesReply> rangeResult = keyValueFutures[j].get();
 
 							//Compare the results with other storage servers
-							if(rangeResult.present())
+							if(rangeResult.present() && !rangeResult.get().error.present())
 							{
 								state GetKeyValuesReply current = rangeResult.get();
 								totalReadAmount += current.data.expectedSize();
@@ -893,6 +950,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 										firstKeySampledBytes += sampleInfo.sampledSize;
 
 									sampledKeys++;
+									if(itemProbability < 1) {
+										sampledKeysWithProb++;
+									}
 								}
 							}
 
@@ -900,11 +960,19 @@ struct ConsistencyCheckWorkload : TestWorkload
 							shardKeys += data.size();
 						}
 						//after requesting each shard, enforce rate limit based on how much data will likely be read
-						if(self->rateLimit > 0)
+						if(rateLimitForThisRound > 0)
 						{
-								wait(rateLimiter->getAllowance(totalReadAmount));
+							wait(rateLimiter->getAllowance(totalReadAmount));
+							// Set ratelimit to max allowed if current round has been going on for a while
+							if(now() - rateLimiterStartTime > 1.1 * CLIENT_KNOBS->CONSISTENCY_CHECK_ONE_ROUND_TARGET_COMPLETION_TIME && rateLimitForThisRound != self->rateLimitMax) {
+								rateLimitForThisRound = self->rateLimitMax;
+								rateLimiter = Reference<IRateControl>( new SpeedLimit(rateLimitForThisRound, 1) );
+								rateLimiterStartTime = now();
+								TraceEvent(SevInfo, "ConsistencyCheck_RateLimitSetMaxForThisRound").detail("RateLimit", rateLimitForThisRound);
+							}
 						}
 						bytesReadInRange += totalReadAmount;
+						bytesReadInthisRound += totalReadAmount;
 
 						//Advance to the next set of entries
 						if(firstValidServer >= 0 && keyValueFutures[firstValidServer].get().get().more)
@@ -920,11 +988,9 @@ struct ConsistencyCheckWorkload : TestWorkload
 					}
 					catch(Error &e)
 					{
-						//If we failed because of a version problem, then retry
-						if(e.code() == error_code_transaction_too_old || e.code() == error_code_future_version || e.code() == error_code_transaction_too_old)
-							TraceEvent("ConsistencyCheck_RetryDataConsistency").error(e);
-						else
-							throw;
+						state Error err = e;
+						wait(onErrorTr.onError(err));
+						TraceEvent("ConsistencyCheck_RetryDataConsistency").error(err);
 					}
 				}
 
@@ -969,12 +1035,13 @@ struct ConsistencyCheckWorkload : TestWorkload
 				int estimateError = abs(shardBytes - sampledBytes);
 
 				//Only perform the check if there are sufficient keys to get a distribution that should resemble a normal distribution
-				if(sampledKeys > 30 && estimateError > failErrorNumStdDev * stdDev)
+				if(sampledKeysWithProb > 30 && estimateError > failErrorNumStdDev * stdDev)
 				{
 					double numStdDev = estimateError / sqrt(shardVariance);
 					TraceEvent("ConsistencyCheck_InaccurateShardEstimate").detail("Min", shardBounds.min.bytes).detail("Max", shardBounds.max.bytes).detail("Estimate", sampledBytes)
 						.detail("Actual", shardBytes).detail("NumStdDev", numStdDev).detail("Variance", shardVariance).detail("StdDev", stdDev)
-						.detail("ShardBegin", printable(range.begin)).detail("ShardEnd", printable(range.end)).detail("NumKeys", shardKeys).detail("NumSampledKeys", sampledKeys);
+						.detail("ShardBegin", printable(range.begin)).detail("ShardEnd", printable(range.end)).detail("NumKeys", shardKeys).detail("NumSampledKeys", sampledKeys)
+						.detail("NumSampledKeysWithProb", sampledKeysWithProb);
 
 					self->testFailure(format("Shard size is more than %f std dev from estimate", failErrorNumStdDev));
 				}
@@ -1017,7 +1084,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 			}
 		}*/
 
-
+		self->bytesReadInPreviousRound = bytesReadInthisRound;
 		return true;
 	}
 
@@ -1065,26 +1132,26 @@ struct ConsistencyCheckWorkload : TestWorkload
 	//Returns false if any worker that should have a storage server does not have one
 	ACTOR Future<bool> checkForStorage(Database cx, DatabaseConfiguration configuration, ConsistencyCheckWorkload *self)
 	{
-		state vector<std::pair<WorkerInterface, ProcessClass>> workers = wait( getWorkers( self->dbInfo ) );
+		state vector<WorkerDetails> workers = wait( getWorkers( self->dbInfo ) );
 		state vector<StorageServerInterface> storageServers = wait( getStorageServers( cx ) );
 		std::set<Optional<Key>> missingStorage;
 
 		for( int i = 0; i < workers.size(); i++ ) {
-			if( !configuration.isExcludedServer(workers[i].first.address()) &&
-				( workers[i].second == ProcessClass::StorageClass || workers[i].second == ProcessClass::UnsetClass ) ) {
+			if( !configuration.isExcludedServer(workers[i].interf.address()) &&
+				( workers[i].processClass == ProcessClass::StorageClass || workers[i].processClass == ProcessClass::UnsetClass ) ) {
 				bool found = false;
 				for( int j = 0; j < storageServers.size(); j++ ) {
-					if( storageServers[j].address() == workers[i].first.address() ) {
+					if( storageServers[j].address() == workers[i].interf.address() ) {
 						found = true;
 						break;
 					}
 				}
 				if( !found ) {
 					TraceEvent("ConsistencyCheck_NoStorage")
-					    .detail("Address", workers[i].first.address())
+					    .detail("Address", workers[i].interf.address())
 					    .detail("ProcessClassEqualToStorageClass",
-					            (int)(workers[i].second == ProcessClass::StorageClass));
-					missingStorage.insert(workers[i].first.locality.dcId());
+					            (int)(workers[i].processClass == ProcessClass::StorageClass));
+					missingStorage.insert(workers[i].interf.locality.dcId());
 				}
 			}
 		}
@@ -1101,36 +1168,36 @@ struct ConsistencyCheckWorkload : TestWorkload
 	}
 
 	ACTOR Future<bool> checkForExtraDataStores(Database cx, ConsistencyCheckWorkload *self) {
-		state vector<std::pair<WorkerInterface, ProcessClass>> workers = wait( getWorkers( self->dbInfo ) );
+		state vector<WorkerDetails> workers = wait( getWorkers( self->dbInfo ) );
 		state vector<StorageServerInterface> storageServers = wait( getStorageServers( cx ) );
 		auto& db = self->dbInfo->get();
 		state std::vector<TLogInterface> logs = db.logSystemConfig.allPresentLogs();
 
-		state std::vector<std::pair<WorkerInterface, ProcessClass>>::iterator itr;
+		state std::vector<WorkerDetails>::iterator itr;
 		state bool foundExtraDataStore = false;
 
 		state std::map<NetworkAddress, std::set<UID>> statefulProcesses;
-		for(auto ss : storageServers) {
+		for (const auto& ss : storageServers) {
 			statefulProcesses[ss.address()].insert(ss.id());
 		}
-		for(auto log : logs) {
+		for (const auto& log : logs) {
 			statefulProcesses[log.address()].insert(log.id());
 		}
 
 		for(itr = workers.begin(); itr != workers.end(); ++itr) {
-			ErrorOr<Standalone<VectorRef<UID>>> stores = wait(itr->first.diskStoreRequest.getReplyUnlessFailedFor(DiskStoreRequest(false), 2, 0));
+			ErrorOr<Standalone<VectorRef<UID>>> stores = wait(itr->interf.diskStoreRequest.getReplyUnlessFailedFor(DiskStoreRequest(false), 2, 0));
 			if(stores.isError()) {
-				TraceEvent("ConsistencyCheck_GetDataStoreFailure").error(stores.getError()).detail("Address", itr->first.address());
+				TraceEvent("ConsistencyCheck_GetDataStoreFailure").error(stores.getError()).detail("Address", itr->interf.address());
 				self->testFailure("Failed to get data stores");
 				return false;
 			}
 
-			for(auto id : stores.get()) {
-				if(!statefulProcesses[itr->first.address()].count(id)) {
-					TraceEvent("ConsistencyCheck_ExtraDataStore").detail("Address", itr->first.address()).detail("DataStoreID", id);
+			for (const auto& id : stores.get()) {
+				if(!statefulProcesses[itr->interf.address()].count(id)) {
+					TraceEvent("ConsistencyCheck_ExtraDataStore").detail("Address", itr->interf.address()).detail("DataStoreID", id);
 					if(g_network->isSimulated()) {
-						TraceEvent("ConsistencyCheck_RebootProcess").detail("Address", itr->first.address()).detail("DataStoreID", id);
-						g_simulator.rebootProcess(g_simulator.getProcessByAddress(itr->first.address()), ISimulator::RebootProcess);
+						TraceEvent("ConsistencyCheck_RebootProcess").detail("Address", itr->interf.address()).detail("DataStoreID", id);
+						g_simulator.rebootProcess(g_simulator.getProcessByAddress(itr->interf.address()), ISimulator::RebootProcess);
 					}
 
 					foundExtraDataStore = true;
@@ -1146,46 +1213,20 @@ struct ConsistencyCheckWorkload : TestWorkload
 		return true;
 	}
 
-	//Returns true if the worker at the given address has the specified machineClass or has an unset class
-	//The interfaceType paramater is used in a TraceEvent, should be something like (Master, MasterProxy, StorageServer, ...)
-	bool workerHasClass(vector<std::pair<WorkerInterface, ProcessClass>> workers, NetworkAddress address, ProcessClass::ClassType machineClass, std::string interfaceType)
-	{
-		//Search all workers until the correct one is found
-		for(int i = 0; i < workers.size(); i++)
-		{
-			if(workers[i].first.address() == address)
-			{
-				if(workers[i].second == machineClass || workers[i].second == ProcessClass::UnsetClass)
-					return true;
-
-				TraceEvent("ConsistencyCheck_InvalidClassType").detail("RequestedClass", workers[i].second.toString())
-					.detail("ActualClass", ProcessClass(machineClass, ProcessClass::CommandLineSource).toString()).detail("InterfaceType", interfaceType);
-
-				return false;
-			}
-		}
-
-		//No worker had specified address
-		TraceEvent("ConsistencyCheck_WorkerNotFound").detail("Address", address).detail("ActualClass", ProcessClass(machineClass, ProcessClass::CommandLineSource).toString())
-			.detail("InterfaceType", interfaceType);
-
-		return false;
-	}
-
 	ACTOR Future<bool> checkWorkerList( Database cx, ConsistencyCheckWorkload *self ) {
 		if(g_simulator.extraDB)
 			return true;
 
-		vector<std::pair<WorkerInterface, ProcessClass>> workers = wait( getWorkers( self->dbInfo ) );
+		vector<WorkerDetails> workers = wait( getWorkers( self->dbInfo ) );
 		std::set<NetworkAddress> workerAddresses;
 
-		for( auto it : workers ) {
-			ISimulator::ProcessInfo* info = g_simulator.getProcessByAddress(it.first.address());
+		for (const auto& it : workers) {
+			ISimulator::ProcessInfo* info = g_simulator.getProcessByAddress(it.interf.address());
 			if(!info || info->failed) {
-				TraceEvent("ConsistencyCheck_FailedWorkerInList").detail("Addr", it.first.address());
+				TraceEvent("ConsistencyCheck_FailedWorkerInList").detail("Addr", it.interf.address());
 				return false;
 			}
-			workerAddresses.insert( NetworkAddress(it.first.address().ip, it.first.address().port, true, false) );
+			workerAddresses.insert( NetworkAddress(it.interf.address().ip, it.interf.address().port, true, false) );
 		}
 
 		vector<ISimulator::ProcessInfo*> all = g_simulator.getAllProcesses();
@@ -1201,7 +1242,7 @@ struct ConsistencyCheckWorkload : TestWorkload
 		return true;
 	}
 
-	static ProcessClass::Fitness getBestAvailableFitness(std::vector<ProcessClass::ClassType>& availableClassTypes, ProcessClass::ClusterRole role) {
+	static ProcessClass::Fitness getBestAvailableFitness(const std::vector<ProcessClass::ClassType>& availableClassTypes, ProcessClass::ClusterRole role) {
 		ProcessClass::Fitness bestAvailableFitness = ProcessClass::NeverAssign;
 		for (auto classType : availableClassTypes) {
 			bestAvailableFitness = std::min(bestAvailableFitness, ProcessClass(classType, ProcessClass::InvalidSource).machineClassFitness(role));
@@ -1217,34 +1258,73 @@ struct ConsistencyCheckWorkload : TestWorkload
 		return "NotSet";
 	}
 
-	typedef std::pair<WorkerInterface, ProcessClass> WorkerClassPair;
+	ACTOR Future<bool> checkCoordinators(Database cx) {
+		state Transaction tr(cx);
+		loop {
+			try {
+				tr.setOption( FDBTransactionOptions::LOCK_AWARE );
+				Optional<Value> currentKey = wait( tr.get( coordinatorsKey ) );
+
+				if (!currentKey.present()) {
+					TraceEvent("ConsistencyCheck_NoCoordinatorKey");
+					return false;
+				}
+
+				state ClusterConnectionString old( currentKey.get().toString() );
+
+				vector<ProcessData> workers = wait(::getWorkers(&tr));
+
+				std::map<NetworkAddress, LocalityData> addr_locality;
+				for(auto w : workers) {
+					addr_locality[w.address] = w.locality;
+				}
+
+				std::set<Optional<Standalone<StringRef>>> checkDuplicates;
+				for (const auto& addr : old.coordinators()) {
+					auto findResult = addr_locality.find(addr);
+					if (findResult != addr_locality.end()) {
+						if(checkDuplicates.count(findResult->second.zoneId())) {
+							TraceEvent("ConsistencyCheck_BadCoordinator").detail("Addr", addr).detail("NotFound", findResult == addr_locality.end());
+							return false;
+						}
+						checkDuplicates.insert(findResult->second.zoneId());
+					}
+				}
+
+				return true;
+			} catch( Error &e ) {
+				wait( tr.onError(e) );
+			}
+		}
+	}
+
 	//Returns true if all machines in the cluster that specified a desired class are operating in that class
 	ACTOR Future<bool> checkUsingDesiredClasses(Database cx, ConsistencyCheckWorkload *self) {
 		state Optional<Key> expectedPrimaryDcId;
 		state Optional<Key> expectedRemoteDcId;
 		state DatabaseConfiguration config = wait(getDatabaseConfiguration(cx));
-		state vector<WorkerClassPair> allWorkers = wait(getWorkers(self->dbInfo));
-		state vector<WorkerClassPair> nonExcludedWorkers = wait(getWorkers(self->dbInfo, GetWorkersRequest::NON_EXCLUDED_PROCESSES_ONLY));
+		state vector<WorkerDetails> allWorkers = wait(getWorkers(self->dbInfo));
+		state vector<WorkerDetails> nonExcludedWorkers = wait(getWorkers(self->dbInfo, GetWorkersRequest::NON_EXCLUDED_PROCESSES_ONLY));
 		auto& db = self->dbInfo->get();
-		
-		std::map<NetworkAddress, WorkerClassPair> allWorkerProcessMap;
+
+		std::map<NetworkAddress, WorkerDetails> allWorkerProcessMap;
 		std::map<Optional<Key>, std::vector<ProcessClass::ClassType>> dcToAllClassTypes;
-		for (auto worker : allWorkers) {
-			allWorkerProcessMap[worker.first.address()] = worker;
-			Optional<Key> dc = worker.first.locality._data[LocalityData::keyDcId];
+		for (const auto& worker : allWorkers) {
+			allWorkerProcessMap[worker.interf.address()] = worker;
+			Optional<Key> dc = worker.interf.locality.dcId();
 			if (!dcToAllClassTypes.count(dc))
 				dcToAllClassTypes.insert({});
-			dcToAllClassTypes[dc].push_back(worker.second.classType());
+			dcToAllClassTypes[dc].push_back(worker.processClass.classType());
 		}
 
-		std::map<NetworkAddress, WorkerClassPair> nonExcludedWorkerProcessMap;
+		std::map<NetworkAddress, WorkerDetails> nonExcludedWorkerProcessMap;
 		std::map<Optional<Key>, std::vector<ProcessClass::ClassType>> dcToNonExcludedClassTypes;
-		for (auto worker : nonExcludedWorkers) {
-			nonExcludedWorkerProcessMap[worker.first.address()] = worker;
-			Optional<Key> dc = worker.first.locality._data[LocalityData::keyDcId];
+		for (const auto& worker : nonExcludedWorkers) {
+			nonExcludedWorkerProcessMap[worker.interf.address()] = worker;
+			Optional<Key> dc = worker.interf.locality.dcId();
 			if (!dcToNonExcludedClassTypes.count(dc))
 				dcToNonExcludedClassTypes.insert({});
-			dcToNonExcludedClassTypes[dc].push_back(worker.second.classType());
+			dcToNonExcludedClassTypes[dc].push_back(worker.processClass.classType());
 		}
 
 		if (!allWorkerProcessMap.count(db.clusterInterface.clientInterface.address())) {
@@ -1256,8 +1336,8 @@ struct ConsistencyCheckWorkload : TestWorkload
 			return false;
 		}
 
-		Optional<Key> ccDcId = allWorkerProcessMap[db.clusterInterface.clientInterface.address()].first.locality._data[LocalityData::keyDcId];
-		Optional<Key> masterDcId = allWorkerProcessMap[db.master.address()].first.locality._data[LocalityData::keyDcId];
+		Optional<Key> ccDcId = allWorkerProcessMap[db.clusterInterface.clientInterface.address()].interf.locality.dcId();
+		Optional<Key> masterDcId = allWorkerProcessMap[db.master.address()].interf.locality.dcId();
 
 		if (ccDcId != masterDcId) {
 			TraceEvent("ConsistencyCheck_CCAndMasterNotInSameDC").detail("ClusterControllerDcId", getOptionalString(ccDcId)).detail("MasterDcId", getOptionalString(masterDcId));
@@ -1287,8 +1367,8 @@ struct ConsistencyCheckWorkload : TestWorkload
 
 		// Check CC
 		ProcessClass::Fitness bestClusterControllerFitness = getBestAvailableFitness(dcToNonExcludedClassTypes[ccDcId], ProcessClass::ClusterController);
-		if (!nonExcludedWorkerProcessMap.count(db.clusterInterface.clientInterface.address()) || nonExcludedWorkerProcessMap[db.clusterInterface.clientInterface.address()].second.machineClassFitness(ProcessClass::ClusterController) != bestClusterControllerFitness) {
-			TraceEvent("ConsistencyCheck_ClusterControllerNotBest").detail("BestClusterControllerFitness", bestClusterControllerFitness).detail("ExistingClusterControllerFit", nonExcludedWorkerProcessMap.count(db.clusterInterface.clientInterface.address()) ? nonExcludedWorkerProcessMap[db.clusterInterface.clientInterface.address()].second.machineClassFitness(ProcessClass::ClusterController) : -1);
+		if (!nonExcludedWorkerProcessMap.count(db.clusterInterface.clientInterface.address()) || nonExcludedWorkerProcessMap[db.clusterInterface.clientInterface.address()].processClass.machineClassFitness(ProcessClass::ClusterController) != bestClusterControllerFitness) {
+			TraceEvent("ConsistencyCheck_ClusterControllerNotBest").detail("BestClusterControllerFitness", bestClusterControllerFitness).detail("ExistingClusterControllerFit", nonExcludedWorkerProcessMap.count(db.clusterInterface.clientInterface.address()) ? nonExcludedWorkerProcessMap[db.clusterInterface.clientInterface.address()].processClass.machineClassFitness(ProcessClass::ClusterController) : -1);
 			return false;
 		}
 
@@ -1301,25 +1381,25 @@ struct ConsistencyCheckWorkload : TestWorkload
 			}
 		}
 
-		if ((!nonExcludedWorkerProcessMap.count(db.master.address()) && bestMasterFitness != ProcessClass::ExcludeFit) || nonExcludedWorkerProcessMap[db.master.address()].second.machineClassFitness(ProcessClass::Master) != bestMasterFitness) {
-			TraceEvent("ConsistencyCheck_MasterNotBest").detail("BestMasterFitness", bestMasterFitness).detail("ExistingMasterFit", nonExcludedWorkerProcessMap.count(db.master.address()) ? nonExcludedWorkerProcessMap[db.master.address()].second.machineClassFitness(ProcessClass::Master) : -1);
+		if ((!nonExcludedWorkerProcessMap.count(db.master.address()) && bestMasterFitness != ProcessClass::ExcludeFit) || nonExcludedWorkerProcessMap[db.master.address()].processClass.machineClassFitness(ProcessClass::Master) != bestMasterFitness) {
+			TraceEvent("ConsistencyCheck_MasterNotBest").detail("BestMasterFitness", bestMasterFitness).detail("ExistingMasterFit", nonExcludedWorkerProcessMap.count(db.master.address()) ? nonExcludedWorkerProcessMap[db.master.address()].processClass.machineClassFitness(ProcessClass::Master) : -1);
 			return false;
 		}
 
 		// Check proxy
 		ProcessClass::Fitness bestMasterProxyFitness = getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::Proxy);
 		for (auto masterProxy : db.client.proxies) {
-			if (!nonExcludedWorkerProcessMap.count(masterProxy.address()) || nonExcludedWorkerProcessMap[masterProxy.address()].second.machineClassFitness(ProcessClass::Proxy) != bestMasterProxyFitness) {
-				TraceEvent("ConsistencyCheck_ProxyNotBest").detail("BestMasterProxyFitness", bestMasterProxyFitness).detail("ExistingMasterProxyFitness", nonExcludedWorkerProcessMap.count(masterProxy.address()) ? nonExcludedWorkerProcessMap[masterProxy.address()].second.machineClassFitness(ProcessClass::Proxy) : -1);
+			if (!nonExcludedWorkerProcessMap.count(masterProxy.address()) || nonExcludedWorkerProcessMap[masterProxy.address()].processClass.machineClassFitness(ProcessClass::Proxy) != bestMasterProxyFitness) {
+				TraceEvent("ConsistencyCheck_ProxyNotBest").detail("BestMasterProxyFitness", bestMasterProxyFitness).detail("ExistingMasterProxyFitness", nonExcludedWorkerProcessMap.count(masterProxy.address()) ? nonExcludedWorkerProcessMap[masterProxy.address()].processClass.machineClassFitness(ProcessClass::Proxy) : -1);
 				return false;
 			}
 		}
 
 		// Check resolver
 		ProcessClass::Fitness bestResolverFitness = getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::Resolver);
-		for (auto resolver : db.resolvers) {
-			if (!nonExcludedWorkerProcessMap.count(resolver.address()) || nonExcludedWorkerProcessMap[resolver.address()].second.machineClassFitness(ProcessClass::Resolver) != bestResolverFitness) {
-				TraceEvent("ConsistencyCheck_ResolverNotBest").detail("BestResolverFitness", bestResolverFitness).detail("ExistingResolverFitness", nonExcludedWorkerProcessMap.count(resolver.address()) ? nonExcludedWorkerProcessMap[resolver.address()].second.machineClassFitness(ProcessClass::Resolver) : -1);
+		for (const auto& resolver : db.resolvers) {
+			if (!nonExcludedWorkerProcessMap.count(resolver.address()) || nonExcludedWorkerProcessMap[resolver.address()].processClass.machineClassFitness(ProcessClass::Resolver) != bestResolverFitness) {
+				TraceEvent("ConsistencyCheck_ResolverNotBest").detail("BestResolverFitness", bestResolverFitness).detail("ExistingResolverFitness", nonExcludedWorkerProcessMap.count(resolver.address()) ? nonExcludedWorkerProcessMap[resolver.address()].processClass.machineClassFitness(ProcessClass::Resolver) : -1);
 				return false;
 			}
 		}
@@ -1341,6 +1421,22 @@ struct ConsistencyCheckWorkload : TestWorkload
 					}
 				}
 			}
+		}
+
+		// Check DataDistributor
+		ProcessClass::Fitness bestDistributorFitness = getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::DataDistributor);
+		if (db.distributor.present() && (!nonExcludedWorkerProcessMap.count(db.distributor.get().address()) || nonExcludedWorkerProcessMap[db.distributor.get().address()].processClass.machineClassFitness(ProcessClass::DataDistributor) != bestDistributorFitness)) {
+			TraceEvent("ConsistencyCheck_DistributorNotBest").detail("BestDataDistributorFitness", bestDistributorFitness)
+			.detail("ExistingDistributorFitness", nonExcludedWorkerProcessMap.count(db.distributor.get().address()) ? nonExcludedWorkerProcessMap[db.distributor.get().address()].processClass.machineClassFitness(ProcessClass::DataDistributor) : -1);
+			return false;
+		}
+
+		// Check Ratekeeper
+		ProcessClass::Fitness bestRatekeeperFitness = getBestAvailableFitness(dcToNonExcludedClassTypes[masterDcId], ProcessClass::Ratekeeper);
+		if (db.ratekeeper.present() && (!nonExcludedWorkerProcessMap.count(db.ratekeeper.get().address()) || nonExcludedWorkerProcessMap[db.ratekeeper.get().address()].processClass.machineClassFitness(ProcessClass::Ratekeeper) != bestRatekeeperFitness)) {
+			TraceEvent("ConsistencyCheck_RatekeeperNotBest").detail("BestRatekeeperFitness", bestRatekeeperFitness)
+			.detail("ExistingRatekeeperFitness", nonExcludedWorkerProcessMap.count(db.ratekeeper.get().address()) ? nonExcludedWorkerProcessMap[db.ratekeeper.get().address()].processClass.machineClassFitness(ProcessClass::Ratekeeper) : -1);
+			return false;
 		}
 
 		// TODO: Check Tlog

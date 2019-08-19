@@ -28,6 +28,7 @@
 #include "fdbclient/json_spirit/json_spirit_writer_template.h"
 #include "fdbclient/json_spirit/json_spirit_reader_template.h"
 #include "fdbrpc/genericactors.actor.h"
+#include "flow/actorcompiler.h" // has to be last include
 
 json_spirit::mValue readJSONStrictly(const std::string &s) {
 	json_spirit::mValue val;
@@ -219,7 +220,7 @@ void JSONDoc::mergeValueInto(json_spirit::mValue &dst, const json_spirit::mValue
 			try {
 				dst = mergeOperator<json_spirit::mValue>(op, aObj, bObj, a, b);
 				return;
-			} catch(std::exception &e) {
+			} catch(std::exception&) {
 			}
 
 			// Now try type and type pair specific operators
@@ -290,7 +291,7 @@ ACTOR Future<Optional<StatusObject>> clientCoordinatorsStatusFetcher(Reference<C
 
 		state vector<Future<Optional<LeaderInfo>>> leaderServers;
 		for (int i = 0; i < coord.clientLeaderServers.size(); i++)
-			leaderServers.push_back(retryBrokenPromise(coord.clientLeaderServers[i].getLeader, GetLeaderRequest(coord.clusterKey, UID()), TaskCoordinationReply));
+			leaderServers.push_back(retryBrokenPromise(coord.clientLeaderServers[i].getLeader, GetLeaderRequest(coord.clusterKey, UID()), TaskPriority::CoordinationReply));
 
 		wait( smartQuorum(leaderServers, leaderServers.size() / 2 + 1, 1.5) || delay(2.0) );
 
@@ -300,7 +301,7 @@ ACTOR Future<Optional<StatusObject>> clientCoordinatorsStatusFetcher(Reference<C
 		int coordinatorsUnavailable = 0;
 		for (int i = 0; i < leaderServers.size(); i++) {
 			StatusObject coordStatus;
-			coordStatus["address"] = coord.clientLeaderServers[i].getLeader.getEndpoint().address.toString();
+			coordStatus["address"] = coord.clientLeaderServers[i].getLeader.getEndpoint().getPrimaryAddress().toString();
 			
 			if (leaderServers[i].isReady()){
 				coordStatus["reachable"] = true;
@@ -440,7 +441,7 @@ StatusObject getClientDatabaseStatus(StatusObjectReader client, StatusObjectRead
 							|| !client.at("cluster_file.up_to_date").get_bool());
 		}
 	}
-	catch(std::exception &e)
+	catch(std::exception&)
 	{
 		// As documented above, exceptions leave isAvailable and isHealthy in the right state
 	}
@@ -461,11 +462,11 @@ ACTOR Future<StatusObject> statusFetcherImpl( Reference<ClusterConnectionFile> f
 	// This could be read from the JSON but doing so safely is ugly so using a real var.
 	state bool quorum_reachable = false;
 	state int coordinatorsFaultTolerance = 0;
+	state Reference<AsyncVar<Optional<ClusterInterface>>> clusterInterface(new AsyncVar<Optional<ClusterInterface>>);
 
 	try {
 		state int64_t clientTime = time(0);
 
-		state Reference<AsyncVar<Optional<ClusterInterface>>> clusterInterface(new AsyncVar<Optional<ClusterInterface>>);
 		state Future<Void> leaderMon = monitorLeader<ClusterInterface>(f, clusterInterface);
 
 		StatusObject _statusObjClient = wait(clientStatusFetcher(f, &clientMessages, &quorum_reachable, &coordinatorsFaultTolerance));
@@ -501,10 +502,10 @@ ACTOR Future<StatusObject> statusFetcherImpl( Reference<ClusterConnectionFile> f
 							StatusObject::Map &faultToleranceWriteable = statusObjCluster["fault_tolerance"].get_obj();
 							StatusObjectReader faultToleranceReader(faultToleranceWriteable);
 							int maxDataLoss, maxAvailLoss;
-							if (faultToleranceReader.get("max_machine_failures_without_losing_data", maxDataLoss) && faultToleranceReader.get("max_machine_failures_without_losing_availability", maxAvailLoss)) {
-								// max_machine_failures_without_losing_availability <= max_machine_failures_without_losing_data
-								faultToleranceWriteable["max_machine_failures_without_losing_data"] = std::min(maxDataLoss, coordinatorsFaultTolerance);
-								faultToleranceWriteable["max_machine_failures_without_losing_availability"] = std::min(maxAvailLoss, coordinatorsFaultTolerance);
+							if (faultToleranceReader.get("max_zone_failures_without_losing_data", maxDataLoss) && faultToleranceReader.get("max_zone_failures_without_losing_availability", maxAvailLoss)) {
+								// max_zone_failures_without_losing_availability <= max_zone_failures_without_losing_data
+								faultToleranceWriteable["max_zone_failures_without_losing_data"] = std::min(maxDataLoss, coordinatorsFaultTolerance);
+								faultToleranceWriteable["max_zone_failures_without_losing_availability"] = std::min(maxAvailLoss, coordinatorsFaultTolerance);
 							}
 						}
 					}

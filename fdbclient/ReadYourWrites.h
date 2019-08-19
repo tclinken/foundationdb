@@ -22,7 +22,7 @@
 #define FDBCLIENT_READYOURWRITES_H
 #pragma once
 
-#include "fdbclient/NativeAPI.h"
+#include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/KeyRangeMap.h"
 #include "fdbclient/RYWIterator.h"
 #include <list>
@@ -42,13 +42,8 @@ struct ReadYourWritesTransactionOptions {
 	int snapshotRywEnabled;
 
 	ReadYourWritesTransactionOptions() {}
-	explicit ReadYourWritesTransactionOptions(Transaction const& tr) { reset(tr); }
-	void reset(Transaction const& tr) {
-		memset(this, 0, sizeof(*this));
-		timeoutInSeconds = 0.0;
-		maxRetries = -1;
-		snapshotRywEnabled = tr.apiVersionAtLeast(300) ? 1 : 0;
-	}
+	explicit ReadYourWritesTransactionOptions(Transaction const& tr);
+	void reset(Transaction const& tr);
 	bool getAndResetWriteConflictDisabled();
 };
 
@@ -87,7 +82,7 @@ public:
 			KeySelector( firstGreaterOrEqual(keys.end), keys.arena() ), limits, snapshot, reverse );
 	}
 
-	Future< Standalone<VectorRef<const char*>> > getAddressesForKey(const Key& key);
+	[[nodiscard]] Future<Standalone<VectorRef<const char*>>> getAddressesForKey(const Key& key);
 
 	void addReadConflictRange( KeyRangeRef const& keys );
 	void makeSelfConflicting() { tr.makeSelfConflicting(); }
@@ -97,22 +92,23 @@ public:
 	void clear( const KeyRangeRef& range );
 	void clear( const KeyRef& key );
 
-	Future<Void> watch(const Key& key);
+	[[nodiscard]] Future<Void> watch(const Key& key);
 
 	void addWriteConflictRange( KeyRangeRef const& keys );
 
-	Future<Void> commit();
+	[[nodiscard]] Future<Void> commit();
 	Version getCommittedVersion() { return tr.getCommittedVersion(); }
-	Future<Standalone<StringRef>> getVersionstamp();
+	int64_t getApproximateSize() { return approximateSize; }
+	[[nodiscard]] Future<Standalone<StringRef>> getVersionstamp();
 
 	void setOption( FDBTransactionOptions::Option option, Optional<StringRef> value = Optional<StringRef>() );
 
-	Future<Void> onError( Error const& e );
+	[[nodiscard]] Future<Void> onError(Error const& e);
 
 	// These are to permit use as state variables in actors:
 	ReadYourWritesTransaction() : cache(&arena), writes(&arena) {}
-	void operator=(ReadYourWritesTransaction&& r) noexcept(true);
-	ReadYourWritesTransaction(ReadYourWritesTransaction&& r) noexcept(true);
+	void operator=(ReadYourWritesTransaction&& r) BOOST_NOEXCEPT;
+	ReadYourWritesTransaction(ReadYourWritesTransaction&& r) BOOST_NOEXCEPT;
 
 	virtual void addref() { ReferenceCounted<ReadYourWritesTransaction>::addref(); }
 	virtual void delref() { ReferenceCounted<ReadYourWritesTransaction>::delref(); }
@@ -130,7 +126,7 @@ public:
 
 	void getWriteConflicts( KeyRangeMap<bool> *result );
 
-	Database getDatabase(){
+	Database getDatabase() const {
 		return tr.getDatabase();
 	}
 private:
@@ -145,15 +141,17 @@ private:
 	Promise<Void> resetPromise;
 	AndFuture reading;
 	int retries;
+	int64_t approximateSize;
 	Future<Void> timeoutActor;
 	double creationTime;
 	bool commitStarted;
 
 	Reference<TransactionDebugInfo> transactionDebugInfo;
 
+	void resetTimeout();
 	void updateConflictMap( KeyRef const& key, WriteMap::iterator& it ); // pre: it.segmentContains(key)
 	void updateConflictMap( KeyRangeRef const& keys, WriteMap::iterator& it ); // pre: it.segmentContains(keys.begin), keys are already inside this->arena
-	void writeRangeToNativeTransaction( KeyRangeRef const& keys );
+	void writeRangeToNativeTransaction(KeyRangeRef const& keys);
 
 	void resetRyow(); // doesn't reset the encapsulated transaction, or creation time/retry state
 	KeyRef getMaxReadKey();
@@ -163,6 +161,10 @@ private:
 
 	void debugLogRetries(Optional<Error> error = Optional<Error>());
 
+	void setOptionImpl( FDBTransactionOptions::Option option, Optional<StringRef> value = Optional<StringRef>() );
+	void applyPersistentOptions();
+
+	std::vector<std::pair<FDBTransactionOptions::Option, Optional<Standalone<StringRef>>>> persistentOptions;
 	ReadYourWritesTransactionOptions options;
 };
 

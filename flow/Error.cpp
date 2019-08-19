@@ -35,8 +35,6 @@ std::map<int, int>& Error::errorCounts() {
 
 #include <iostream>
 
-extern void flushTraceFileVoid();
-
 Error Error::fromUnvalidatedCode(int code) {
 	if (code < 0 || code > 30000) {
 		Error e = Error::fromCode(error_code_unknown_error);
@@ -116,4 +114,8 @@ void ErrorCodeTable::addCode(int code, const char *name, const char *description
 
 bool isAssertDisabled(int line) {
 	return FLOW_KNOBS && (FLOW_KNOBS->DISABLE_ASSERTS == -1 || FLOW_KNOBS->DISABLE_ASSERTS == line);
+}
+
+void breakpoint_me() {
+	return;
 }

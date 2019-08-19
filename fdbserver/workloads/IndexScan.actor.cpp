@@ -19,9 +19,9 @@
  */
 
 #include "fdbrpc/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
 #include "fdbclient/ReadYourWrites.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
@@ -105,7 +105,7 @@ struct IndexScanWorkload : KVWorkload {
 	}
 
 	ACTOR static Future<Void> scanDatabase( Database cx, IndexScanWorkload *self ) {
-		state int startNode = g_random->randomInt(0, self->nodeCount / 2); //start in the first half of the database
+		state int startNode = deterministicRandom()->randomInt(0, self->nodeCount / 2); //start in the first half of the database
 		state KeySelector begin = firstGreaterOrEqual( self->keyForIndex( startNode ) );
 		state KeySelector end = firstGreaterThan( self->keyForIndex( self->nodeCount ) );
 		state GetRangeLimits limits( CLIENT_KNOBS->ROW_LIMIT_UNLIMITED, self->bytesPerRead );

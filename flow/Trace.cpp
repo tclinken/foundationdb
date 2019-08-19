@@ -43,17 +43,7 @@
 #undef min
 #endif
 
-namespace {
-	Reference<ITraceLogFormatter> createLogFormatter(const std::string& f) {
-		if (f == "json") {
-			return Reference<ITraceLogFormatter>(new JsonTraceLogFormatter());
-		} else if (f == "xml") {
-			return Reference<ITraceLogFormatter>(new XmlTraceLogFormatter());
-		} else {
-			UNREACHABLE();
-		}
-	}
-} // namespace
+thread_local int g_trace_depth = 0;
 
 class DummyThreadPool : public IThreadPool, ReferenceCounted<DummyThreadPool> {
 public:
@@ -123,8 +113,7 @@ struct SuppressionMap {
 };
 
 TraceBatch g_traceBatch;
-trace_clock_t g_trace_clock = TRACE_CLOCK_NOW;
-IRandom* trace_random = NULL;
+thread_local trace_clock_t g_trace_clock = TRACE_CLOCK_REALTIME;
 
 LatestEventCache latestEventCache;
 SuppressionMap suppressedEvents;
@@ -133,7 +122,6 @@ static TransientThresholdMetricSample<Standalone<StringRef>> *traceEventThrottle
 static const char *TRACE_EVENT_THROTTLE_STARTING_TYPE = "TraceEventThrottle_";
 static const char *TRACE_EVENT_INVALID_SUPPRESSION = "InvalidSuppression_";
 static int TRACE_LOG_MAX_PREOPEN_BUFFER = 1000000;
-static int TRACE_EVENT_MAX_SIZE = 4000;
 
 struct TraceLog {
 	Reference<ITraceLogFormatter> formatter;
@@ -217,7 +205,7 @@ public:
 		}
 		void triggerAll() {
 			MutexHolder h(mutex);
-			for(int i=ntriggered; i<barriers.size(); i++)
+			for(uint32_t i=ntriggered; i<barriers.size(); i++)
 				unsafeTrigger(i);
 			ntriggered = barriers.size();
 		}
@@ -306,7 +294,7 @@ public:
 		this->logGroup = logGroup;
 		this->localAddress = na;
 
-		basename = format("%s/%s.%s.%s", directory.c_str(), processName.c_str(), timestamp.c_str(), g_random->randomAlphaNumeric(6).c_str());
+		basename = format("%s/%s.%s.%s", directory.c_str(), processName.c_str(), timestamp.c_str(), deterministicRandom()->randomAlphaNumeric(6).c_str());
 		logWriter = Reference<ITraceLogWriter>(new FileTraceLogWriter(directory, processName, basename, formatter->getExtension(), maxLogsSize, [this](){ barriers->triggerAll(); }));
 
 		if ( g_network->isSimulated() )
@@ -345,7 +333,7 @@ public:
 
 	void annotateEvent( TraceEventFields &fields ) {
 		if(localAddress.present()) {
-			fields.addField("Machine", format("%d.%d.%d.%d:%d", (localAddress.get().ip>>24)&0xff, (localAddress.get().ip>>16)&0xff, (localAddress.get().ip>>8)&0xff, localAddress.get().ip&0xff, localAddress.get().port));
+			fields.addField("Machine", formatIpPort(localAddress.get().ip, localAddress.get().port));
 		}
 
 		fields.addField("LogGroup", logGroup);
@@ -576,15 +564,40 @@ TraceEventFields LatestEventCache::getLatestError() {
 
 static TraceLog g_traceLog;
 
-bool selectTraceFormatter(std::string format) {
-	ASSERT(!g_traceLog.isOpen());
+namespace {
+template <bool validate>
+bool traceFormatImpl(std::string& format) {
 	std::transform(format.begin(), format.end(), format.begin(), ::tolower);
-	if (format == "xml" || format == "json") {
-		g_traceLog.formatter = createLogFormatter(format);
+	if (format == "xml") {
+		if (!validate) {
+			g_traceLog.formatter = Reference<ITraceLogFormatter>(new XmlTraceLogFormatter());
+		}
+		return true;
+	} else if (format == "json") {
+		if (!validate) {
+			g_traceLog.formatter = Reference<ITraceLogFormatter>(new JsonTraceLogFormatter());
+		}
 		return true;
 	} else {
+		if (!validate) {
+			g_traceLog.formatter = Reference<ITraceLogFormatter>(new XmlTraceLogFormatter());
+		}
 		return false;
 	}
+}
+} // namespace
+
+bool selectTraceFormatter(std::string format) {
+	ASSERT(!g_traceLog.isOpen());
+	bool recognized = traceFormatImpl</*validate*/ false>(format);
+	if (!recognized) {
+		TraceEvent(SevWarnAlways, "UnrecognizedTraceFormat").detail("format", format);
+	}
+	return recognized;
+}
+
+bool validateTraceFormat(std::string format) {
+	return traceFormatImpl</*validate*/ true>(format);
 }
 
 ThreadFuture<Void> flushTraceFile() {
@@ -611,10 +624,12 @@ void openTraceFile(const NetworkAddress& na, uint64_t rollsize, uint64_t maxLogs
 	if (baseOfBase.empty())
 		baseOfBase = "trace";
 
-	std::string baseName = format("%s.%03d.%03d.%03d.%03d.%d", baseOfBase.c_str(), (na.ip>>24)&0xff, (na.ip>>16)&0xff, (na.ip>>8)&0xff, na.ip&0xff, na.port);
+	std::string ip = na.ip.toString();
+	std::replace(ip.begin(), ip.end(), ':', '_'); // For IPv6, Windows doesn't accept ':' in filenames.
+	std::string baseName = format("%s.%s.%d", baseOfBase.c_str(), ip.c_str(), na.port);
 	g_traceLog.open( directory, baseName, logGroup, format("%lld", time(NULL)), rollsize, maxLogsSize, !g_network->isSimulated() ? na : Optional<NetworkAddress>());
 
-	uncancellable(recurring(&flushTraceFile, FLOW_KNOBS->TRACE_FLUSH_INTERVAL, TaskFlushTrace));
+	uncancellable(recurring(&flushTraceFile, FLOW_KNOBS->TRACE_FLUSH_INTERVAL, TaskPriority::FlushTrace));
 	g_traceBatch.dump();
 }
 
@@ -638,12 +653,40 @@ void removeTraceRole(std::string role) {
 	g_traceLog.removeRole(role);
 }
 
-TraceEvent::TraceEvent( const char* type, UID id ) : id(id), type(type), severity(SevInfo), initialized(false), enabled(true) {}
-TraceEvent::TraceEvent( Severity severity, const char* type, UID id ) : id(id), type(type), severity(severity), initialized(false), enabled(true) {}
-TraceEvent::TraceEvent( TraceInterval& interval, UID id ) : id(id), type(interval.type), severity(interval.severity), initialized(false), enabled(true) {
+TraceEvent::TraceEvent( const char* type, UID id ) : id(id), type(type), severity(SevInfo), initialized(false), enabled(true) {
+	g_trace_depth++;
+	setMaxFieldLength(0);
+	setMaxEventLength(0);
+}
+TraceEvent::TraceEvent( Severity severity, const char* type, UID id )
+	: id(id), type(type), severity(severity), initialized(false),
+	  enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= severity) {
+	g_trace_depth++;
+	setMaxFieldLength(0);
+	setMaxEventLength(0);
+}
+TraceEvent::TraceEvent( TraceInterval& interval, UID id )
+	: id(id), type(interval.type),
+	  severity(interval.severity),
+	  initialized(false),
+	  enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= interval.severity) {
+
+	g_trace_depth++;
+	setMaxFieldLength(0);
+	setMaxEventLength(0);
+
 	init(interval);
 }
-TraceEvent::TraceEvent( Severity severity, TraceInterval& interval, UID id ) : id(id), type(interval.type), severity(severity), initialized(false), enabled(true) {
+TraceEvent::TraceEvent( Severity severity, TraceInterval& interval, UID id )
+	: id(id), type(interval.type),
+	  severity(severity),
+	  initialized(false),
+	  enabled(g_network == nullptr || FLOW_KNOBS->MIN_TRACE_SEVERITY <= severity) {
+
+	g_trace_depth++;
+	setMaxFieldLength(0);
+	setMaxEventLength(0);
+
 	init(interval);
 }
 
@@ -698,12 +741,12 @@ bool TraceEvent::init() {
 			severity = SevWarnAlways;
 		}
 
-		detail("Severity", severity);
+		detail("Severity", int(severity));
 		detailf("Time", "%.6f", time);
 		detail("Type", type);
 		if(g_network && g_network->isSimulated()) {
 			NetworkAddress local = g_network->getLocalAddress();
-			detailf("Machine", "%d.%d.%d.%d:%d", (local.ip>>24)&0xff, (local.ip>>16)&0xff, (local.ip>>8)&0xff, local.ip&0xff, local.port);
+			detail("Machine", formatIpPort(local.ip, local.port));
 		}
 		detail("ID", id);
 		if(err.isValid()) {
@@ -721,25 +764,23 @@ bool TraceEvent::init() {
 	return enabled;
 }
 
-TraceEvent& TraceEvent::error(class Error const& error, bool includeCancelled) {
-	if(enabled) {
-		if (error.code() != error_code_actor_cancelled || includeCancelled) {
-			err = error;
-			if (initialized) {
-				if (error.isInjectedFault()) {
-					detail("ErrorIsInjectedFault", true);
-					if(severity == SevError) severity = SevWarnAlways;
-				}
-				detail("Error", error.name());
-				detail("ErrorDescription", error.what());
-				detail("ErrorCode", error.code());
+TraceEvent& TraceEvent::errorImpl(class Error const& error, bool includeCancelled) {
+	if (error.code() != error_code_actor_cancelled || includeCancelled) {
+		err = error;
+		if (initialized) {
+			if (error.isInjectedFault()) {
+				detail("ErrorIsInjectedFault", true);
+				if(severity == SevError) severity = SevWarnAlways;
 			}
+			detail("Error", error.name());
+			detail("ErrorDescription", error.what());
+			detail("ErrorCode", error.code());
+		}
+	} else {
+		if (initialized) {
+			TraceEvent(g_network && g_network->isSimulated() ? SevError : SevWarnAlways, std::string(TRACE_EVENT_INVALID_SUPPRESSION).append(type).c_str()).suppressFor(5);
 		} else {
-			if (initialized) {
-				TraceEvent(g_network && g_network->isSimulated() ? SevError : SevWarnAlways, std::string(TRACE_EVENT_INVALID_SUPPRESSION).append(type).c_str()).suppressFor(5);
-			} else {
-				enabled = false;
-			}
+			enabled = false;
 		}
 	}
 	return *this;
@@ -748,8 +789,8 @@ TraceEvent& TraceEvent::error(class Error const& error, bool includeCancelled) {
 TraceEvent& TraceEvent::detailImpl( std::string&& key, std::string&& value, bool writeEventMetricField) {
 	init();
 	if (enabled) {
-		if( value.size() > 495 ) {
-			value = value.substr(0, 495) + "...";
+		if( maxFieldLength >= 0 && value.size() > maxFieldLength ) {
+			value = value.substr(0, maxFieldLength) + "...";
 		}
 
 		if(writeEventMetricField) {
@@ -758,71 +799,26 @@ TraceEvent& TraceEvent::detailImpl( std::string&& key, std::string&& value, bool
 
 		fields.addField(std::move(key), std::move(value));
 
-		if(fields.sizeBytes() > TRACE_EVENT_MAX_SIZE) {
-			TraceEvent(g_network && g_network->isSimulated() ? SevError : SevWarnAlways, "TraceEventOverflow").detail("TraceFirstBytes", fields.toString().substr(300));
+		if(maxEventLength >= 0 && fields.sizeBytes() > maxEventLength) {
+			TraceEvent(g_network && g_network->isSimulated() ? SevError : SevWarnAlways, "TraceEventOverflow").setMaxEventLength(1000).detail("TraceFirstBytes", fields.toString().substr(300));
 			enabled = false;
 		}
 	}
 	return *this;
 }
 
-TraceEvent& TraceEvent::detail( std::string key, std::string value ) {
-	return detailImpl(std::move(key), std::move(value));
+void TraceEvent::setField(const char* key, int64_t value) {
+	tmpEventMetric->setField(key, value);
 }
-TraceEvent& TraceEvent::detail( std::string key, double value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), value);
-	return detailfNoMetric( std::move(key), "%g", value );
+
+void TraceEvent::setField(const char* key, double value) {
+	tmpEventMetric->setField(key, value);
 }
-TraceEvent& TraceEvent::detail( std::string key, int value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), (int64_t)value);
-	return detailfNoMetric( std::move(key), "%d", value );
+
+void TraceEvent::setField(const char* key, const std::string& value) {
+	tmpEventMetric->setField(key, Standalone<StringRef>(value));
 }
-TraceEvent& TraceEvent::detail( std::string key, unsigned value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), (int64_t)value);
-	return detailfNoMetric( std::move(key), "%u", value );
-}
-TraceEvent& TraceEvent::detail( std::string key, long int value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), (int64_t)value);
-	return detailfNoMetric( std::move(key), "%ld", value );
-}
-TraceEvent& TraceEvent::detail( std::string key, long unsigned int value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), (int64_t)value);
-	return detailfNoMetric( std::move(key), "%lu", value );
-}
-TraceEvent& TraceEvent::detail( std::string key, long long int value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), (int64_t)value);
-	return detailfNoMetric( std::move(key), "%lld", value );
-}
-TraceEvent& TraceEvent::detail( std::string key, long long unsigned int value ) {
-	init();
-	if(enabled)
-		tmpEventMetric->setField(key.c_str(), (int64_t)value);
-	return detailfNoMetric( std::move(key), "%llu", value );
-}
-TraceEvent& TraceEvent::detail( std::string key, const NetworkAddress& value ) {
-	return detailImpl( std::move(key), value.toString() );
-}
-TraceEvent& TraceEvent::detail( std::string key, const UID& value ) {
-	return detailf( std::move(key), "%016llx", value.first() );  // SOMEDAY: Log entire value?  We also do this explicitly in some "lists" in various individual TraceEvent calls
-}
-TraceEvent& TraceEvent::detailext( std::string key, StringRef const& value ) {
-	return detailImpl(std::move(key), value.printable());
-}
-TraceEvent& TraceEvent::detailext( std::string key, const Optional<Standalone<StringRef>>& value ) {
-	return detailImpl(std::move(key), (value.present()) ? value.get().printable() : "[not set]");
-}
+
 TraceEvent& TraceEvent::detailf( std::string key, const char* valueFormat, ... ) {
 	if (enabled) {
 		va_list args;
@@ -863,12 +859,7 @@ TraceEvent& TraceEvent::sample( double sampleRate, bool logSampleRate ) {
 			return *this;
 		}
 
-		if(!g_random) {
-			sampleRate = 1.0;
-		}
-		else {
-			enabled = enabled && g_random->random01() < sampleRate;
-		}
+		enabled = enabled && deterministicRandom()->random01() < sampleRate;
 
 		if(enabled && logSampleRate) {
 			detail("SampleRate", sampleRate);
@@ -899,6 +890,28 @@ TraceEvent& TraceEvent::suppressFor( double duration, bool logSuppressedEventCou
 			}
 		}
 		init(); //we do not want any future calls on this trace event to disable it, because we have already counted it towards our suppression budget
+	}
+
+	return *this;
+}
+
+TraceEvent& TraceEvent::setMaxFieldLength(int maxFieldLength) {
+	if(maxFieldLength == 0) {
+		this->maxFieldLength = FLOW_KNOBS ? FLOW_KNOBS->MAX_TRACE_FIELD_LENGTH : 495;
+	} 
+	else {
+		this->maxFieldLength = maxFieldLength;
+	}
+
+	return *this;
+}
+
+TraceEvent& TraceEvent::setMaxEventLength(int maxEventLength) {
+	if(maxEventLength == 0) {
+		this->maxEventLength = FLOW_KNOBS ? FLOW_KNOBS->MAX_TRACE_EVENT_LENGTH : 4000;
+	} 
+	else {
+		this->maxEventLength = maxEventLength;
 	}
 
 	return *this;
@@ -935,7 +948,10 @@ TraceEvent::~TraceEvent() {
 				severity = SevError;
 			}
 
-			TraceEvent::eventCounts[severity/10]++;
+			if(isNetworkThread()) {
+				TraceEvent::eventCounts[severity/10]++;
+			}
+
 			g_traceLog.writeEvent( fields, trackingKey, severity > SevWarnAlways );
 
 			if (g_traceLog.isOpen()) {
@@ -955,6 +971,7 @@ TraceEvent::~TraceEvent() {
 		TraceEvent(SevError, "TraceEventDestructorError").error(e,true);
 	}
 	delete tmpEventMetric;
+	g_trace_depth--;
 }
 
 thread_local bool TraceEvent::networkThread = false;
@@ -962,6 +979,7 @@ thread_local bool TraceEvent::networkThread = false;
 void TraceEvent::setNetworkThread() {
 	traceEventThrottlerCache = new TransientThresholdMetricSample<Standalone<StringRef>>(FLOW_KNOBS->TRACE_EVENT_METRIC_UNITS_PER_SAMPLE, FLOW_KNOBS->TRACE_EVENT_THROTTLER_MSG_LIMIT);
 	networkThread = true;
+	g_trace_clock = TRACE_CLOCK_NOW;
 }
 
 bool TraceEvent::isNetworkThread() {
@@ -969,7 +987,7 @@ bool TraceEvent::isNetworkThread() {
 }
 
 TraceInterval& TraceInterval::begin() {
-	pairID = trace_random->randomUniqueID();
+	pairID = nondeterministicRandom()->randomUniqueID();
 	count = 0;
 	return *this;
 }
@@ -1002,7 +1020,7 @@ void TraceBatch::dump() {
 	std::string machine;
 	if(g_network->isSimulated()) {
 		NetworkAddress local = g_network->getLocalAddress();
-		machine = format("%d.%d.%d.%d:%d", (local.ip>>24)&0xff,(local.ip>>16)&0xff,(local.ip>>8)&0xff,local.ip&0xff,local.port);
+		machine = formatIpPort(local.ip, local.port);
 	}
 
 	for(int i = 0; i < attachBatch.size(); i++) {
@@ -1107,8 +1125,94 @@ std::string TraceEventFields::getValue(std::string key) const {
 		return value;
 	}
 	else {
+		TraceEvent ev(SevWarn, "TraceEventFieldNotFound");
+		ev.suppressFor(1.0);
+		if(tryGetValue("Type", value)) {
+			ev.detail("Event", value);
+		}
+		ev.detail("FieldName", key);
+
 		throw attribute_not_found();
 	}
+}
+
+namespace {
+void parseNumericValue(std::string const& s, double &outValue, bool permissive = false) {
+	double d = 0;
+	int consumed = 0;
+	int r = sscanf(s.c_str(), "%lf%n", &d, &consumed);
+	if (r == 1 && (consumed == s.size() || permissive)) {
+		outValue = d;
+		return;
+	}
+
+	throw attribute_not_found();
+}
+
+void parseNumericValue(std::string const& s, int &outValue, bool permissive = false) {
+	long long int iLong = 0;
+	int consumed = 0;
+	int r = sscanf(s.c_str(), "%lld%n", &iLong, &consumed);
+	if (r == 1 && (consumed == s.size() || permissive)) {
+		if (std::numeric_limits<int>::min() <= iLong && iLong <= std::numeric_limits<int>::max()) {
+			outValue = (int)iLong;  // Downcast definitely safe
+			return;
+		}
+		else {
+			throw attribute_too_large();
+		}
+	}
+
+	throw attribute_not_found();
+}
+
+void parseNumericValue(std::string const& s, int64_t &outValue, bool permissive = false) {
+	long long int i = 0;
+	int consumed = 0;
+	int r = sscanf(s.c_str(), "%lld%n", &i, &consumed);
+	if (r == 1 && (consumed == s.size() || permissive)) {
+		outValue = i;
+		return;
+	}
+
+	throw attribute_not_found();
+}
+
+template<class T>
+T getNumericValue(TraceEventFields const& fields, std::string key, bool permissive) {
+	std::string field = fields.getValue(key);
+
+	try {
+		T value;
+		parseNumericValue(field, value, permissive);
+		return value;
+	}
+	catch(Error &e) {
+		std::string type;
+
+		TraceEvent ev(SevWarn, "ErrorParsingNumericTraceEventField");
+		ev.error(e);
+		if(fields.tryGetValue("Type", type)) {
+			ev.detail("Event", type);
+		}
+		ev.detail("FieldName", key);
+		ev.detail("FieldValue", field);
+
+		throw;
+	}
+}
+} // namespace
+
+int TraceEventFields::getInt(std::string key, bool permissive) const {
+	return getNumericValue<int>(*this, key, permissive);
+}
+
+int64_t TraceEventFields::getInt64(std::string key, bool permissive) const {
+	return getNumericValue<int64_t>(*this, key, permissive);
+}
+
+double TraceEventFields::getDouble(std::string key, bool permissive) const {
+	return getNumericValue<double>(*this, key, permissive);
 }
 
 std::string TraceEventFields::toString() const {
@@ -1154,4 +1258,9 @@ void TraceEventFields::validateFormat() const {
 			}
 		}
 	}
+}
+
+std::string traceableStringToString(const char* value, size_t S) {
+	ASSERT_WE_THINK(S > 0 && value[S - 1] == '\0');
+	return std::string(value, S - 1); // Exclude trailing \0 byte
 }

@@ -18,12 +18,13 @@
  * limitations under the License.
  */
 
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 struct SidebandMessage {
+	constexpr static FileIdentifier file_identifier = 11862046;
 	uint64_t key;
 	Version commitVersion;
 
@@ -37,6 +38,7 @@ struct SidebandMessage {
 };
 
 struct SidebandInterface {
+	constexpr static FileIdentifier file_identifier = 15950544;
 	RequestStream<SidebandMessage> updates;
 
 	UID id() const { return updates.getEndpoint().token; }
@@ -93,7 +95,7 @@ struct SidebandWorkload : TestWorkload {
 	ACTOR Future<Void> persistInterface( SidebandWorkload *self, Database cx ) {
 		state Transaction tr(cx);
 		BinaryWriter wr(IncludeVersion()); wr << self->interf;
-		state Standalone<StringRef> serializedInterface = wr.toStringRef();
+		state Standalone<StringRef> serializedInterface = wr.toValue();
 		loop {
 			try {
 				Optional<Value> val = wait( tr.get( StringRef( format("Sideband/Client/%d", self->clientId) ) ) );
@@ -138,9 +140,9 @@ struct SidebandWorkload : TestWorkload {
 		loop {
 			wait( poisson( &lastTime, 1.0 / self->operationsPerSecond ) );
 			state Transaction tr(cx);
-			state uint64_t key = g_random->randomUniqueID().hash();
+			state uint64_t key = deterministicRandom()->randomUniqueID().hash();
 			state Version commitVersion = wait( tr.getReadVersion() );  // Used if the key is already present
-			state Standalone<StringRef> messageKey = format( "Sideband/Message/%llx", key );
+			state Standalone<StringRef> messageKey(format( "Sideband/Message/%llx", key ));
 			loop {
 				try {
 					Optional<Value> val = wait( tr.get( messageKey ) );
@@ -165,7 +167,7 @@ struct SidebandWorkload : TestWorkload {
 	ACTOR Future<Void> checker( SidebandWorkload *self, Database cx ) {
 		loop {
 			state SidebandMessage message = waitNext( self->interf.updates.getFuture() );
-			state Standalone<StringRef> messageKey = format( "Sideband/Message/%llx", message.key );
+			state Standalone<StringRef> messageKey(format("Sideband/Message/%llx", message.key));
 			state Transaction tr(cx);
 			loop {
 				try {

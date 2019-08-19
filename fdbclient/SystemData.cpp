@@ -46,7 +46,7 @@ const Value keyServersValue( const vector<UID>& src, const vector<UID>& dest ) {
 	// src and dest are expected to be sorted
 	ASSERT( std::is_sorted(src.begin(), src.end()) && std::is_sorted(dest.begin(), dest.end()) );
 	BinaryWriter wr((IncludeVersion())); wr << src << dest;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 void decodeKeyServersValue( const ValueRef& value, vector<UID>& src, vector<UID>& dest ) {
 	if (value.size()) {
@@ -62,7 +62,7 @@ const Value logsValue( const vector<std::pair<UID, NetworkAddress>>& logs, const
 	BinaryWriter wr(IncludeVersion());
 	wr << logs;
 	wr << oldLogs;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 std::pair<vector<std::pair<UID, NetworkAddress>>,vector<std::pair<UID, NetworkAddress>>> decodeLogsValue( const ValueRef& value ) {
 	vector<std::pair<UID, NetworkAddress>> logs;
@@ -84,14 +84,14 @@ const Key serverKeysKey( UID serverID, const KeyRef& key ) {
 	wr << serverID;
 	wr.serializeBytes( LiteralStringRef("/") );
 	wr.serializeBytes( key );
-	return wr.toStringRef();
+	return wr.toValue();
 }
 const Key serverKeysPrefixFor( UID serverID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( serverKeysPrefix );
 	wr << serverID;
 	wr.serializeBytes( LiteralStringRef("/") );
-	return wr.toStringRef();
+	return wr.toValue();
 }
 UID serverKeysDecodeServer( const KeyRef& key ) {
 	UID server_id;
@@ -111,6 +111,9 @@ const KeyRangeRef serverTagConflictKeys(
 	LiteralStringRef("\xff/serverTagConflict/"),
 	LiteralStringRef("\xff/serverTagConflict0") );
 const KeyRef serverTagConflictPrefix = serverTagConflictKeys.begin;
+// serverTagHistoryKeys is the old tag a storage server uses before it is migrated to a different location.
+// For example, we can copy a SS file to a remote DC and start the SS there;
+//   The new SS will need to cnosume the last bits of data from the old tag it is responsible for.
 const KeyRangeRef serverTagHistoryKeys(
 	LiteralStringRef("\xff/serverTagHistory/"),
 	LiteralStringRef("\xff/serverTagHistory0") );
@@ -120,21 +123,21 @@ const Key serverTagKeyFor( UID serverID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( serverTagKeys.begin );
 	wr << serverID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const Key serverTagHistoryKeyFor( UID serverID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( serverTagHistoryKeys.begin );
 	wr << serverID;
-	return addVersionStampAtEnd(wr.toStringRef());
+	return addVersionStampAtEnd(wr.toValue());
 }
 
 const KeyRange serverTagHistoryRangeFor( UID serverID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( serverTagHistoryKeys.begin );
 	wr << serverID;
-	return prefixRange(wr.toStringRef());
+	return prefixRange(wr.toValue());
 }
 
 const KeyRange serverTagHistoryRangeBefore( UID serverID, Version version ) {
@@ -142,18 +145,18 @@ const KeyRange serverTagHistoryRangeBefore( UID serverID, Version version ) {
 	wr.serializeBytes( serverTagHistoryKeys.begin );
 	wr << serverID;
 	version = bigEndian64(version);
-	
+
 	Key versionStr = makeString( 8 );
 	uint8_t* data = mutateString( versionStr );
 	memcpy(data, &version, 8);
 
-	return KeyRangeRef( wr.toStringRef(), versionStr.withPrefix(wr.toStringRef()) );
+	return KeyRangeRef( wr.toValue(), versionStr.withPrefix(wr.toValue()) );
 }
 
 const Value serverTagValue( Tag tag ) {
 	BinaryWriter wr(IncludeVersion());
 	wr << tag;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 UID decodeServerTagKey( KeyRef const& key ) {
@@ -173,7 +176,7 @@ Version decodeServerTagHistoryKey( KeyRef const& key ) {
 Tag decodeServerTagValue( ValueRef const& value ) {
 	Tag s;
 	BinaryReader reader( value, IncludeVersion() );
-	if( reader.protocolVersion() < 0x0FDB00A560010001LL ) {
+	if(!reader.protocolVersion().hasTagLocality()) {
 		int16_t id;
 		reader >> id;
 		if(id == invalidTagOld) {
@@ -195,7 +198,7 @@ const Key serverTagConflictKeyFor( Tag tag ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( serverTagConflictKeys.begin );
 	wr << tag;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const KeyRangeRef tagLocalityListKeys(
@@ -207,13 +210,13 @@ const Key tagLocalityListKeyFor( Optional<Value> dcID ) {
 	BinaryWriter wr(AssumeVersion(currentProtocolVersion));
 	wr.serializeBytes( tagLocalityListKeys.begin );
 	wr << dcID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const Value tagLocalityListValue( int8_t const& tagLocality ) {
 	BinaryWriter wr(IncludeVersion());
 	wr << tagLocality;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 Optional<Value> decodeTagLocalityListKey( KeyRef const& key ) {
 	Optional<Value> dcID;
@@ -237,13 +240,13 @@ const Key datacenterReplicasKeyFor( Optional<Value> dcID ) {
 	BinaryWriter wr(AssumeVersion(currentProtocolVersion));
 	wr.serializeBytes( datacenterReplicasKeys.begin );
 	wr << dcID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const Value datacenterReplicasValue( int const& replicas ) {
 	BinaryWriter wr(IncludeVersion());
 	wr << replicas;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 Optional<Value> decodeDatacenterReplicasKey( KeyRef const& key ) {
 	Optional<Value> dcID;
@@ -272,7 +275,7 @@ const Key tLogDatacentersKeyFor( Optional<Value> dcID ) {
 	BinaryWriter wr(AssumeVersion(currentProtocolVersion));
 	wr.serializeBytes( tLogDatacentersKeys.begin );
 	wr << dcID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 Optional<Value> decodeTLogDatacentersKey( KeyRef const& key ) {
 	Optional<Value> dcID;
@@ -293,13 +296,13 @@ const Key serverListKeyFor( UID serverID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( serverListKeys.begin );
 	wr << serverID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const Value serverListValue( StorageServerInterface const& server ) {
 	BinaryWriter wr(IncludeVersion());
 	wr << server;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 UID decodeServerListKey( KeyRef const& key ) {
 	UID serverID;
@@ -327,13 +330,13 @@ const Key processClassKeyFor(StringRef processID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( processClassKeys.begin );
 	wr << processID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const Value processClassValue( ProcessClass const& processClass ) {
 	BinaryWriter wr(IncludeVersion());
 	wr << processClass;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 Key decodeProcessClassKey( KeyRef const& key ) {
@@ -374,11 +377,7 @@ const AddressExclusion decodeExcludedServersKey( KeyRef const& key ) {
 }
 std::string encodeExcludedServersKey( AddressExclusion const& addr ) {
 	//FIXME: make sure what's persisted here is not affected by innocent changes elsewhere
-	std::string as = format( "%d.%d.%d.%d", (addr.ip>>24)&0xff, (addr.ip>>16)&0xff, (addr.ip>>8)&0xff, addr.ip&0xff );
-	//ASSERT( StringRef(as).endsWith(LiteralStringRef(":0")) == (addr.port == 0) );
-	if (!addr.isWholeMachine())
-		as += format(":%d", addr.port);
-	return excludedServersPrefix.toString() + as;
+	return excludedServersPrefix.toString() + addr.toString();
 }
 
 const KeyRangeRef workerListKeys( LiteralStringRef("\xff/worker/"), LiteralStringRef("\xff/worker0") );
@@ -388,13 +387,13 @@ const Key workerListKeyFor( StringRef processID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( workerListKeys.begin );
 	wr << processID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 const Value workerListValue( ProcessData const& processData ) {
 	BinaryWriter wr(IncludeVersion());
 	wr << processData;
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 Key decodeWorkerListKey(KeyRef const& key) {
@@ -418,8 +417,12 @@ const KeyRef minRequiredCommitVersionKey = LiteralStringRef("\xff/minRequiredCom
 const KeyRef globalKeysPrefix = LiteralStringRef("\xff/globals");
 const KeyRef lastEpochEndKey = LiteralStringRef("\xff/globals/lastEpochEnd");
 const KeyRef lastEpochEndPrivateKey = LiteralStringRef("\xff\xff/globals/lastEpochEnd");
+const KeyRef killStorageKey = LiteralStringRef("\xff/globals/killStorage");
+const KeyRef killStoragePrivateKey = LiteralStringRef("\xff\xff/globals/killStorage");
 const KeyRef rebootWhenDurableKey = LiteralStringRef("\xff/globals/rebootWhenDurable");
 const KeyRef rebootWhenDurablePrivateKey = LiteralStringRef("\xff\xff/globals/rebootWhenDurable");
+const KeyRef primaryLocalityKey = LiteralStringRef("\xff/globals/primaryLocality");
+const KeyRef primaryLocalityPrivateKey = LiteralStringRef("\xff\xff/globals/primaryLocality");
 const KeyRef fastLoggingEnabled = LiteralStringRef("\xff/globals/fastLoggingEnabled");
 const KeyRef fastLoggingEnabledPrivateKey = LiteralStringRef("\xff\xff/globals/fastLoggingEnabled");
 
@@ -433,6 +436,12 @@ const UID dataDistributionModeLock = UID(6345,3425);
 const KeyRangeRef fdbClientInfoPrefixRange(LiteralStringRef("\xff\x02/fdbClientInfo/"), LiteralStringRef("\xff\x02/fdbClientInfo0"));
 const KeyRef fdbClientInfoTxnSampleRate = LiteralStringRef("\xff\x02/fdbClientInfo/client_txn_sample_rate/");
 const KeyRef fdbClientInfoTxnSizeLimit = LiteralStringRef("\xff\x02/fdbClientInfo/client_txn_size_limit/");
+
+// ConsistencyCheck settings
+const KeyRef fdbShouldConsistencyCheckBeSuspended = LiteralStringRef("\xff\x02/ConsistencyCheck/Suspend");
+
+// Request latency measurement key
+const KeyRef latencyBandConfigKey = LiteralStringRef("\xff\x02/latencyBandConfig");
 
 // Keyspace to maintain wall clock to version map
 const KeyRangeRef timeKeeperPrefixRange(LiteralStringRef("\xff\x02/timeKeeper/map/"), LiteralStringRef("\xff\x02/timeKeeper/map0"));
@@ -480,7 +489,7 @@ Key logRangesEncodeKey(KeyRef keyBegin, UID logUid) {
 // Returns the start key and optionally the logRange Uid
 KeyRef logRangesDecodeKey(KeyRef key, UID* logUid) {
 	if (key.size() < logRangesRange.begin.size() + sizeof(UID)) {
-		TraceEvent(SevError, "InvalidDecodeKey").detail("Key", printable(key));
+		TraceEvent(SevError, "InvalidDecodeKey").detail("Key", key);
 		ASSERT(false);
 	}
 
@@ -495,7 +504,7 @@ KeyRef logRangesDecodeKey(KeyRef key, UID* logUid) {
 Key logRangesEncodeValue(KeyRef keyEnd, KeyRef destPath) {
 	BinaryWriter wr(IncludeVersion());
 	wr << std::make_pair(keyEnd, destPath);
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 // \xff/logRanges/[16-byte UID][begin key] := serialize( make_pair([end key], [destination key prefix]), IncludeVersion() )
@@ -518,7 +527,7 @@ Key uidPrefixKey(KeyRef keyPrefix, UID logUid) {
 	BinaryWriter bw(Unversioned());
 	bw.serializeBytes(keyPrefix);
 	bw << logUid;
-	return bw.toStringRef();
+	return bw.toValue();
 }
 
 // Apply mutations constant variables
@@ -558,7 +567,7 @@ const Key metricConfKey( KeyRef const& prefix, MetricNameRef const& name, KeyRef
 	wr.serializeBytes( LiteralStringRef("\x00\x01") );
 	wr.serializeBytes( key );
 	wr.serializeBytes( LiteralStringRef("\x00") );
-	return wr.toStringRef();
+	return wr.toValue();
 }
 
 std::pair<MetricNameRef, KeyRef> decodeMetricConfKey( KeyRef const& prefix, KeyRef const& key ) {
@@ -583,6 +592,9 @@ std::pair<MetricNameRef, KeyRef> decodeMetricConfKey( KeyRef const& prefix, KeyR
 const KeyRef maxUIDKey = LiteralStringRef("\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff");
 
 const KeyRef databaseLockedKey = LiteralStringRef("\xff/dbLocked");
+const KeyRef metadataVersionKey = LiteralStringRef("\xff/metadataVersion");
+const KeyRef metadataVersionKeyEnd = LiteralStringRef("\xff/metadataVersion\x00");
+const KeyRef metadataVersionRequiredValue = LiteralStringRef("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00");
 const KeyRef mustContainSystemMutationsKey = LiteralStringRef("\xff/mustContainSystemMutations");
 
 const KeyRangeRef monitorConfKeys(
@@ -600,5 +612,29 @@ const Key restoreWorkerKeyFor( UID const& agentID ) {
 	BinaryWriter wr(Unversioned());
 	wr.serializeBytes( restoreWorkersKeys.begin );
 	wr << agentID;
-	return wr.toStringRef();
+	return wr.toValue();
 }
+
+const KeyRef healthyZoneKey = LiteralStringRef("\xff\x02/healthyZone");
+const StringRef ignoreSSFailuresZoneString = LiteralStringRef("IgnoreSSFailures");
+const KeyRef rebalanceDDIgnoreKey = LiteralStringRef("\xff\x02/rebalanceDDIgnored");
+
+const Value healthyZoneValue( StringRef const& zoneId, Version version ) {
+	BinaryWriter wr(IncludeVersion());
+	wr << zoneId;
+	wr << version;
+	return wr.toValue();
+}
+std::pair<Key,Version> decodeHealthyZoneValue( ValueRef const& value) {
+	Key zoneId;
+	Version version;
+	BinaryReader reader( value, IncludeVersion() );
+	reader >> zoneId;
+	reader >> version;
+	return std::make_pair(zoneId, version);
+}
+
+const KeyRangeRef testOnlyTxnStateStorePrefixRange(
+    LiteralStringRef("\xff/TESTONLYtxnStateStore/"),
+    LiteralStringRef("\xff/TESTONLYtxnStateStore0")
+);

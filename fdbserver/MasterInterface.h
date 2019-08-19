@@ -25,57 +25,38 @@
 #include "fdbclient/FDBTypes.h"
 #include "fdbclient/StorageServerInterface.h"
 #include "fdbclient/CommitTransaction.h"
+#include "fdbclient/DatabaseConfiguration.h"
 #include "fdbserver/TLogInterface.h"
 
 typedef uint64_t DBRecoveryCount;
 
 struct MasterInterface {
+	constexpr static FileIdentifier file_identifier = 5979145;
 	LocalityData locality;
 	RequestStream< ReplyPromise<Void> > waitFailure;
-	RequestStream< struct GetRateInfoRequest > getRateInfo;
 	RequestStream< struct TLogRejoinRequest > tlogRejoin; // sent by tlog (whether or not rebooted) to communicate with a new master
 	RequestStream< struct ChangeCoordinatorsRequest > changeCoordinators;
 	RequestStream< struct GetCommitVersionRequest > getCommitVersion;
 
-	NetworkAddress address() const { return changeCoordinators.getEndpoint().address; }
+	NetworkAddress address() const { return changeCoordinators.getEndpoint().getPrimaryAddress(); }
 
 	UID id() const { return changeCoordinators.getEndpoint().token; }
 	template <class Archive>
 	void serialize(Archive& ar) {
-		ASSERT( ar.protocolVersion() >= 0x0FDB00A200040001LL );
-		serializer(ar, locality, waitFailure, getRateInfo, tlogRejoin, changeCoordinators, getCommitVersion);
+		if constexpr (!is_fb_function<Archive>) {
+                ASSERT( ar.protocolVersion().isValid() );
+        }
+		serializer(ar, locality, waitFailure, tlogRejoin, changeCoordinators, getCommitVersion);
 	}
 
 	void initEndpoints() {
-		getCommitVersion.getEndpoint( TaskProxyGetConsistentReadVersion );
-	}
-};
-
-struct GetRateInfoRequest {
-	UID requesterID;
-	int64_t totalReleasedTransactions;
-	ReplyPromise<struct GetRateInfoReply> reply;
-
-	GetRateInfoRequest() {}
-	GetRateInfoRequest( UID const& requesterID, int64_t totalReleasedTransactions ) : requesterID(requesterID), totalReleasedTransactions(totalReleasedTransactions) {}
-
-	template <class Ar>
-	void serialize(Ar& ar) {
-		serializer(ar, requesterID, totalReleasedTransactions, reply);
-	}
-};
-
-struct GetRateInfoReply {
-	double transactionRate;
-	double leaseDuration;
-
-	template <class Ar>
-	void serialize(Ar& ar) {
-		serializer(ar, transactionRate, leaseDuration);
+		getCommitVersion.getEndpoint( TaskPriority::ProxyGetConsistentReadVersion );
+		tlogRejoin.getEndpoint( TaskPriority::MasterTLogRejoin );
 	}
 };
 
 struct TLogRejoinRequest {
+	constexpr static FileIdentifier file_identifier = 15692200;
 	TLogInterface myInterface;
 	ReplyPromise<bool> reply;   // false means someone else registered, so we should re-register.  true means this master is recovered, so don't send again to the same master.
 
@@ -88,6 +69,7 @@ struct TLogRejoinRequest {
 };
 
 struct ChangeCoordinatorsRequest {
+	constexpr static FileIdentifier file_identifier = 13605416;
 	Standalone<StringRef> newConnectionString;
 	ReplyPromise<Void> reply;  // normally throws even on success!
 
@@ -101,6 +83,7 @@ struct ChangeCoordinatorsRequest {
 };
 
 struct ResolverMoveRef {
+	constexpr static FileIdentifier file_identifier = 11945475;
 	KeyRangeRef range;
 	int dest;
 
@@ -126,6 +109,7 @@ struct ResolverMoveRef {
 };
 
 struct GetCommitVersionReply {
+	constexpr static FileIdentifier file_identifier = 3568822;
 	Standalone<VectorRef<ResolverMoveRef>> resolverChanges;
 	Version resolverChangesVersion;
 	Version version;
@@ -142,6 +126,7 @@ struct GetCommitVersionReply {
 };
 
 struct GetCommitVersionRequest {
+	constexpr static FileIdentifier file_identifier = 16683181;
 	uint64_t requestNum;
 	uint64_t mostRecentProcessedRequestNum;
 	UID requestingProxy;

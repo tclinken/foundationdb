@@ -19,10 +19,10 @@
  */
 
 #include "fdbrpc/simulator.h"
-#include "fdbclient/BackupAgent.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/BackupAgent.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
-#include "fdbclient/ManagementAPI.h"
+#include "fdbclient/ManagementAPI.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 //A workload which test the correctness of upgrading DR from 5.1 to 5.2
@@ -34,7 +34,7 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 	Database extraDB;
 
 	BackupToDBUpgradeWorkload(WorkloadContext const& wcx) : TestWorkload(wcx) {
-		backupAfter = getOption(options, LiteralStringRef("backupAfter"), g_random->random01() * 10.0);
+		backupAfter = getOption(options, LiteralStringRef("backupAfter"), deterministicRandom()->random01() * 10.0);
 		backupPrefix = getOption(options, LiteralStringRef("backupPrefix"), StringRef());
 		backupRangeLengthMax = getOption(options, LiteralStringRef("backupRangeLengthMax"), 1);
 		stopDifferentialAfter = getOption(options, LiteralStringRef("stopDifferentialAfter"), 60.0);
@@ -56,8 +56,8 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 			for (int rangeLoop = 0; rangeLoop < backupRangesCount; rangeLoop++)
 			{
 				// Get a random range of a random sizes
-				beginRange = KeyRef(backupRanges.arena(), g_random->randomAlphaNumeric(g_random->randomInt(1, backupRangeLengthMax + 1)));
-				endRange = KeyRef(backupRanges.arena(), g_random->randomAlphaNumeric(g_random->randomInt(1, backupRangeLengthMax + 1)));
+				beginRange = KeyRef(backupRanges.arena(), deterministicRandom()->randomAlphaNumeric(deterministicRandom()->randomInt(1, backupRangeLengthMax + 1)));
+				endRange = KeyRef(backupRanges.arena(), deterministicRandom()->randomAlphaNumeric(deterministicRandom()->randomInt(1, backupRangeLengthMax + 1)));
 
 				// Add the range to the array
 				backupRanges.push_back_deep(backupRanges.arena(), (beginRange < endRange) ? KeyRangeRef(beginRange, endRange) : KeyRangeRef(endRange, beginRange));
@@ -126,7 +126,7 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 			}
 		}
 
-		int _ = wait( backupAgent->waitBackup(self->extraDB, tag, false) );
+		wait(success( backupAgent->waitBackup(self->extraDB, tag, false) ));
 
 		return Void();
 	}
@@ -156,7 +156,7 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 				state int64_t taskCount = wait( backupAgent->getTaskCount(tr) );
 				state int waitCycles = 0;
 
-				if ((taskCount) && (0)) {
+				if ((taskCount) && false) {
 					TraceEvent("DRU_EndingNonzeroTaskCount").detail("BackupTag", printable(tag)).detail("TaskCount", taskCount).detail("WaitCycles", waitCycles);
 					printf("EndingNonZeroTasks: %ld\n", (long) taskCount);
 					wait(TaskBucket::debugPrintRange(cx, LiteralStringRef("\xff"), StringRef()));
@@ -169,7 +169,6 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 					printf("%.6f Wait #%4d for %lld tasks to end\n", now(), waitCycles, (long long) taskCount);
 
 					wait(delay(20.0));
-					tr->commit();
 					tr = Reference<ReadYourWritesTransaction>(new ReadYourWritesTransaction(cx));
 					int64_t _taskCount = wait( backupAgent->getTaskCount(tr) );
 					taskCount = _taskCount;
@@ -445,7 +444,7 @@ struct BackupToDBUpgradeWorkload : TestWorkload {
 					throw;
 			}
 
-			int _ = wait(restoreAgent.waitBackup(cx, self->restoreTag));
+			wait(success(restoreAgent.waitBackup(cx, self->restoreTag)));
 			wait(restoreAgent.unlockBackup(cx, self->restoreTag));
 			wait(checkData(self->extraDB, logUid, logUid, self->backupTag, &backupAgent));
 

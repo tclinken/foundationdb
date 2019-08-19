@@ -23,22 +23,23 @@
 #include "fdbserver/Knobs.h"
 #include "flow/ActorCollection.h"
 #include "fdbserver/LeaderElection.h"
+#include "flow/actorcompiler.h" // has to be last include
 
 ACTOR Future<GenerationRegReadReply> waitAndSendRead( RequestStream<GenerationRegReadRequest> to, GenerationRegReadRequest req ) {
 	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
-		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*g_random->random01() ) );
+		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	state GenerationRegReadReply reply = wait( retryBrokenPromise( to, req ) );
 	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
-		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*g_random->random01() ) );
+		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	return reply;
 }
 
 ACTOR Future<UniqueGeneration> waitAndSendWrite(RequestStream<GenerationRegWriteRequest> to, GenerationRegWriteRequest req) {
 	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
-		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*g_random->random01() ) );
+		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	state UniqueGeneration reply = wait( retryBrokenPromise( to, req ) );
 	if( SERVER_KNOBS->BUGGIFY_ALL_COORDINATION || BUGGIFY )
-		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*g_random->random01() ) );
+		wait( delay( SERVER_KNOBS->BUGGIFIED_EVENTUAL_CONSISTENCY*deterministicRandom()->random01() ) );
 	return reply;
 }
 
@@ -77,21 +78,25 @@ struct CoordinatedStateImpl {
 	ACTOR static Future<Value> read( CoordinatedStateImpl* self ) {
 		ASSERT( self->stage == 0 );
 
-		self->stage = 1;
-		GenerationRegReadReply rep = wait( self->replicatedRead( self, GenerationRegReadRequest( self->coordinators.clusterKey, UniqueGeneration() ) ) );
-		self->conflictGen = std::max( self->conflictGen, std::max(rep.gen.generation, rep.rgen.generation) ) + 1;
-		self->gen = UniqueGeneration( self->conflictGen, g_random->randomUniqueID() );
+		{
+			self->stage = 1;
+			GenerationRegReadReply rep = wait( self->replicatedRead( self, GenerationRegReadRequest( self->coordinators.clusterKey, UniqueGeneration() ) ) );
+			self->conflictGen = std::max( self->conflictGen, std::max(rep.gen.generation, rep.rgen.generation) ) + 1;
+			self->gen = UniqueGeneration( self->conflictGen, deterministicRandom()->randomUniqueID() );
+		}
 
-		self->stage = 2;
-		GenerationRegReadReply rep = wait( self->replicatedRead( self, GenerationRegReadRequest( self->coordinators.clusterKey, self->gen ) ) );
-		self->stage = 3;
-		self->conflictGen = std::max(self->conflictGen, std::max( rep.gen.generation, rep.rgen.generation ));
-		if (self->isDoomed(rep))
-			self->doomed = true;
-		self->initial = rep.gen.generation == 0;
+		{
+			self->stage = 2;
+			GenerationRegReadReply rep = wait( self->replicatedRead( self, GenerationRegReadRequest( self->coordinators.clusterKey, self->gen ) ) );
+			self->stage = 3;
+			self->conflictGen = std::max(self->conflictGen, std::max( rep.gen.generation, rep.rgen.generation ));
+			if (self->isDoomed(rep))
+				self->doomed = true;
+			self->initial = rep.gen.generation == 0;
 
-		self->stage = 4;
-		return rep.value.present() ? rep.value.get() : Value();
+			self->stage = 4;
+			return rep.value.present() ? rep.value.get() : Value();
+		}
 	}
 	ACTOR static Future<Void> onConflict( CoordinatedStateImpl* self ) {
 		ASSERT( self->stage == 4 );
@@ -207,7 +212,7 @@ struct MovableValue {
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		ASSERT( ar.protocolVersion() >= 0x0FDB00A2000D0001LL );
+		ASSERT( ar.protocolVersion().hasMovableCoordinatedState() );
 		serializer(ar, value, mode, other);
 	}
 };
@@ -225,7 +230,7 @@ struct MovableCoordinatedStateImpl {
 		Value rawValue = wait( self->cs.read() );
 		if( rawValue.size() ) {
 			BinaryReader r( rawValue, IncludeVersion() );
-			if (r.protocolVersion() < 0x0FDB00A2000D0001LL) {
+			if (!r.protocolVersion().hasMovableCoordinatedState()) {
 				// Old coordinated state, not a MovableValue
 				moveState.value = rawValue;
 			} else

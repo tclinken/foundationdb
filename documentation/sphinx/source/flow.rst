@@ -40,7 +40,7 @@ Promises and futures can be used within a single process, but their real strengt
 wait()
 ------
 
-At the point when a receiver holding a ``Future<T>`` needs the ``T`` to continue computation, it invokes the ``wait()`` statement with the ``Future<T>`` as its parameter. The ``wait()`` statement allows the calling actor to pause execution until the value of the future is set, returning a value of type ``T`` During the wait, other actors can continue execution, providing asynchronous concurrency within a single process.
+At the point when a receiver holding a ``Future<T>`` needs the ``T`` to continue computation, it invokes the ``wait()`` statement with the ``Future<T>`` as its parameter. The ``wait()`` statement allows the calling actor to pause execution until the value of the future is set, returning a value of type ``T``. During the wait, other actors can continue execution, providing asynchronous concurrency within a single process.
 
 ACTOR
 -----
@@ -74,7 +74,7 @@ Example: A Server Interface
 
 Below is a actor that runs on single server communicating over the network. Its functionality is to maintain a count in response to asynchronous messages from other actors. It supports an interface implemented with a loop containing a ``choose`` statement with a ``when`` for each request type. Each ``when`` uses ``waitNext()`` to asynchronously wait for the next request in the stream. The add and subtract interfaces modify the count itself, stored with a state variable. The get interface takes a ``Promise<int>`` instead of just an ``int`` to facilitate sending back the return message.
 
-To write the equivalent code directly in C++, a developer would have to implement a complex set of callbacks with exception-handling, requiring far more engineering effort. Flow makes it much easier to implement this sort of asynchronous coordination, with no loss of performance.:
+To write the equivalent code directly in C++, a developer would have to implement a complex set of callbacks with exception-handling, requiring far more engineering effort. Flow makes it much easier to implement this sort of asynchronous coordination, with no loss of performance:
 
 .. code-block:: c
 
@@ -95,3 +95,64 @@ To write the equivalent code directly in C++, a developer would have to implemen
             }
         }
     }
+
+Caveats
+=======
+
+Even though flow-code looks a lot like C++, it is not. It has different rules and the files are preprocessed. It is always important to keep this in mind when programming flow.
+
+We still want to be able to use IDEs and modern editors (with language servers like cquery or clang-based completion engines like ycm). Because of this there is a header-file ``actorcompiler.h`` in flow which defines preprocessor definitions to make flow compile as normal C++ code. CMake even supports a special mode so that it doesn't preprocess flow files. This mode can be used by passing ``-DOPEN_FOR_IDE=ON`` to cmake. Additionally we generate a special ``compile_commands.json`` into the source-directory which will support opening the project in IDEs and editors that look for a compilation database.
+
+Some preprocessor definitions will not fix all issues though. When programming flow the following things have to be taken care of by the programmer:
+
+- Local variables don't survive a call to ``wait``. So this would be legal flow-code, but NOT legal C++-code:
+
+  .. code-block:: c
+
+                ACTOR void foo {
+                    int i = 0;
+                    wait(someFuture);
+                    int i = 2;
+                    wait(someOtherFuture)
+                }
+
+
+  In order to make this not break IDE-support one can either rename the second occurrence of this variable or, if this is not desired as it might make the code unreadable, one can use scoping:
+
+
+  .. code-block:: c
+
+                ACTOR void foo {
+                    {
+                        int i = 0;
+                        wait(someFuture);
+                    }
+                    {
+                        int i = 2;
+                        wait(someOtherFuture)
+                    }
+                }
+
+- An ``ACTOR`` is compiled into a class internally. Which means that within an actor-function, ``this`` is a valid pointer to this class. But using them explicitely (or as described later implicitely) will break IDE support. One can use ``THIS`` and ``THIS_ADDR`` instead. But be careful as ``THIS`` will be of type ``nullptr_t`` in IDE-mode and of the actor-type in normal compilation mode.
+- Lambdas and state variables are weird in a sense. After actorcompilation a state variable is a member of the compiled actor class. In IDE mode it is considered a normal local variable. This can result in some surprising side-effects. So the following code will only compile if the method ``Foo::bar`` is defined as ``const``:
+
+  .. code-block:: c
+
+                ACTOR foo() {
+                    state Foo f;
+                    foo([=]() { f.bar(); })
+                }
+
+
+  If it is not, one has to pass the member explictely as reference:
+
+  .. code-block:: c
+
+                ACTOR foo() {
+                    state Foo f;
+                    auto x = &f;
+                    foo([x]() { x->bar(); })
+                }
+
+- state variables in flow don't follow the normal scoping rules. So in flow a state variable can be defined in a inner scope and later it can be used in the outer scope. In order to not break compilation in IDE-mode, always define state variables in the outermost scope they will be used.
+

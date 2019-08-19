@@ -87,7 +87,7 @@ struct KeyWithWriter {
 	void operator=( KeyWithWriter&& r ) { key = std::move(r.key); writer = std::move(r.writer); writerOffset = r.writerOffset; }
 
 	StringRef value() {
-		return StringRef(writer.toStringRef().substr(writerOffset));
+		return StringRef(writer.toValue().substr(writerOffset));
 	}
 };
 
@@ -183,8 +183,7 @@ public:
 		// Get and store the local address in the metric collection, but only if it is not 0.0.0.0:0
 		if( address.size() == 0 ) {
 			NetworkAddress addr = g_network->getLocalAddress();
-			if(addr.ip != 0 && addr.port != 0)
-				address = StringRef(addr.toString());
+			if (addr.ip.isValid() && addr.port != 0) address = StringRef(addr.toString());
 		}
 		return address.size() != 0;
 	}
@@ -217,14 +216,14 @@ struct MetricData {
 		appendStart(appendStart) {
 	}
 
-	MetricData( MetricData&& r ) noexcept(true) :
+	MetricData( MetricData&& r ) BOOST_NOEXCEPT :
 		start(r.start),
 		rollTime(r.rollTime),
 		appendStart(r.appendStart),
 		writer(std::move(r.writer)) {
 	}
 
-	void operator=( MetricData&& r ) noexcept(true) {
+	void operator=( MetricData&& r ) BOOST_NOEXCEPT {
 		start = r.start; rollTime = r.rollTime; appendStart = r.appendStart; writer = std::move(r.writer);
 	}
 
@@ -317,7 +316,14 @@ auto tuple_map(F f, const Tuple &t, const Tuples &... ts) -> decltype( tuple_map
 }
 
 template <class T>
-struct Descriptor {};
+struct Descriptor {
+#ifndef NO_INTELLISENSE
+	using fields = std::tuple<>;
+	typedef make_index_sequence_impl<0, index_sequence<>, std::tuple_size<fields>::value>::type field_indexes;
+
+	static StringRef typeName() {{ return LiteralStringRef(""); }}
+#endif
+};
 
 // FieldHeader is a serializable (FIXED SIZE!) and updatable Header type for Metric field levels.
 // Update is via += with either a T or another FieldHeader
@@ -534,7 +540,7 @@ struct FieldLevel {
 					// Otherwise, insert but first, patch the header if this block is old enough
 					if(data.rollTime <= lastTimeRequiringHeaderPatch) {
 						ASSERT(previousHeader.present());
-						FieldLevel<T>::updateSerializedHeader(data.writer.toStringRef(), previousHeader.get());
+						FieldLevel<T>::updateSerializedHeader(data.writer.toValue(), previousHeader.get());
 					}
 
 					batch.inserts.push_back(KeyWithWriter(mk.packDataKey(data.start), data.writer));
@@ -620,9 +626,9 @@ template <class T, class Descriptor = NullDescriptor, class FieldLevelType = Fie
 struct EventField : public Descriptor {
 	std::vector<FieldLevelType> levels;
 
-	EventField( EventField&& r ) noexcept(true) : Descriptor(r), levels(std::move(r.levels)) {}
+	EventField( EventField&& r ) BOOST_NOEXCEPT : Descriptor(r), levels(std::move(r.levels)) {}
 
-	void operator=( EventField&& r ) noexcept(true) {
+	void operator=( EventField&& r ) BOOST_NOEXCEPT {
 		levels = std::move(r.levels);
 	}
 
@@ -794,7 +800,7 @@ struct EventMetric : E, ReferenceCounted<EventMetric<E>>, MetricUtil<EventMetric
 			return 0;
 
 		uint64_t t = explicitTime ? explicitTime : timer_int();
-		double x = g_random->random01();
+		double x = deterministicRandom()->random01();
 
 		int64_t l = 0;
 		if (x == 0.0)
@@ -819,23 +825,32 @@ struct EventMetric : E, ReferenceCounted<EventMetric<E>>, MetricUtil<EventMetric
 
 	template <size_t... Is>
 	void logFields(index_sequence<Is...>, uint64_t t, int64_t l, bool& overflow, int64_t& bytes) {
+#ifdef NO_INTELLISENSE
 		auto _ = {
 			(std::get<Is>(values).log( std::tuple_element<Is, typename Descriptor<E>::fields>::type::get( static_cast<E&>(*this) ), t, l, overflow, bytes ), Void())...
 		};
+		(void)_;
+#endif
 	}
 
 	template <size_t... Is>
 	void initFields(index_sequence<Is...>) {
+#ifdef NO_INTELLISENSE
 		auto _ = {
 			(std::get<Is>(values).init(), Void())...
 		};
+		(void)_;
+#endif
 	}
 
 	template <size_t... Is>
 	void nextKeys(index_sequence<Is...>, uint64_t t, int64_t l ) {
+#ifdef NO_INTELLISENSE
 		auto _ = {
 			(std::get<Is>(values).nextKey(t, l),Void())...
 		};
+		(void)_;
+#endif
 	}
 
 	virtual void flushData(MetricKeyRef const &mk, uint64_t rollTime, MetricUpdateBatch &batch) {
@@ -849,9 +864,12 @@ struct EventMetric : E, ReferenceCounted<EventMetric<E>>, MetricUtil<EventMetric
 
 	template <size_t... Is>
 	void flushFields(index_sequence<Is...>, MetricKeyRef const &mk, uint64_t rollTime, MetricUpdateBatch &batch ) {
+#ifdef NO_INTELLISENSE
 		auto _ = {
 			(std::get<Is>(values).flushField( mk, rollTime, batch ),Void())...
 		};
+		(void)_;
+#endif
 	}
 
 	virtual void rollMetric( uint64_t t ) {
@@ -861,9 +879,12 @@ struct EventMetric : E, ReferenceCounted<EventMetric<E>>, MetricUtil<EventMetric
 
 	template <size_t... Is>
 	void rollFields(index_sequence<Is...>, uint64_t t ) {
+#ifdef NO_INTELLISENSE
 		auto _ = {
 			(std::get<Is>(values).rollMetric( t ),Void())...
 		};
+		(void)_;
+#endif
 	}
 
 	virtual void registerFields( MetricKeyRef const &mk, std::vector<Standalone<StringRef>>& fieldKeys ) {
@@ -873,9 +894,12 @@ struct EventMetric : E, ReferenceCounted<EventMetric<E>>, MetricUtil<EventMetric
 
 	template <size_t... Is>
 	void registerFields(index_sequence<Is...>, const MetricKeyRef &mk, std::vector<Standalone<StringRef>>& fieldKeys ) {
+#ifdef NO_INTELLISENSE
 		auto _ = {
 			(std::get<Is>(values).registerField( mk, fieldKeys ),Void())...
 		};
+		(void)_;
+#endif
 	}
 protected:
     bool it;
@@ -1225,7 +1249,7 @@ public:
 		// TOOD: If it is useful, this could be the current header value of the most recently logged level.
 		wr << FieldHeader<TimeAndValue<T>>();
 		enc.write(wr, tv);
-		return wr.toStringRef();
+		return wr.toValue();
 	}
 
 	void onEnable() {
@@ -1266,7 +1290,7 @@ public:
 		int64_t bytes = 0;
 
 		if(tv.time != 0) {
-			double x = g_random->random01();
+			double x = deterministicRandom()->random01();
 
 			int64_t l = 0;
 			if (x == 0.0)
@@ -1361,6 +1385,21 @@ struct MetricHandle {
 	typename T::ValueType getValue() const  { return ref->getValue(); }
 
 	Reference<T> ref;
+};
+
+template<class T>
+struct Traceable<MetricHandle<T>> : Traceable<typename T::ValueType> {
+	static std::string toString(const MetricHandle<T>& value) {
+		return Traceable<typename T::ValueType>::toString(value.getValue());
+	}
+};
+
+template<class T>
+struct SpecialTraceMetricType<MetricHandle<T>> : SpecialTraceMetricType<typename T::ValueType> {
+	using parent = SpecialTraceMetricType<typename T::ValueType>;
+	static auto getValue(const MetricHandle<T>& value) -> decltype(parent::getValue(value.getValue())) {
+		return parent::getValue(value.getValue());
+	}
 };
 
 typedef MetricHandle<Int64Metric> Int64MetricHandle;

@@ -23,7 +23,7 @@
 #pragma once
 
 #include "fdbclient/FDBTypes.h"
-#include "fdbclient/NativeAPI.h"
+#include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/SystemData.h"
 #include "flow/IndexedSet.h"
 
@@ -101,6 +101,7 @@ struct ExtStringRef {
 	}
 
 private:
+	friend struct Traceable<ExtStringRef>;
 	StringRef base;
 	int extra_zero_bytes;
 };
@@ -112,6 +113,19 @@ inline bool operator < ( const ExtStringRef& lhs, const ExtStringRef& rhs ) { re
 inline bool operator > ( const ExtStringRef& lhs, const ExtStringRef& rhs ) { return lhs.cmp(rhs)>0; }
 inline bool operator <= ( const ExtStringRef& lhs, const ExtStringRef& rhs ) { return lhs.cmp(rhs)<=0; }
 inline bool operator >= ( const ExtStringRef& lhs, const ExtStringRef& rhs ) { return lhs.cmp(rhs)>=0; }
+
+template<>
+struct Traceable<ExtStringRef> : std::true_type {
+	static std::string toString(const ExtStringRef str) {
+		std::string result;
+		result.reserve(str.size());
+		std::copy(str.base.begin(), str.base.end(), std::back_inserter(result));
+		for (int i = 0; i < str.extra_zero_bytes; ++i) {
+			result.push_back('\0');
+		}
+		return Traceable<std::string>::toString(result);
+	}
+};
 
 class SnapshotCache {
 private:
@@ -135,6 +149,18 @@ private:
 		}
 		bool operator < (StringRef const& r) const {
 			return beginKey < r;
+		}
+		bool operator <= (Entry const& r) const {
+			return beginKey <= r.beginKey;
+		}
+		bool operator <= (StringRef const& r) const {
+			return beginKey <= r;
+		}
+		bool operator == (Entry const& r) const {
+			return beginKey == r.beginKey;
+		}
+		bool operator == (StringRef const& r) const {
+			return beginKey == r;
 		}
 
 		int segments() const { return 2*(values.size()+1); }
@@ -190,8 +216,8 @@ public:
 				return ExtStringRef( it->values[ (offset-1)>>1 ].key, 1-(offset&1) );
 		}
 
-		KeyValueRef const& kv( Arena& arena ){  // only if is_kv()
-			return it->values[ (offset-2)>>1 ];
+		const KeyValueRef* kv(Arena& arena) { // only if is_kv()
+			return &it->values[(offset - 2) >> 1];
 		}
 
 		iterator& operator++() {
@@ -265,8 +291,8 @@ public:
 		entries.insert( Entry( allKeys.end, afterAllKeys, VectorRef<KeyValueRef>() ), NoMetric(), true );
 	}
 	// Visual Studio refuses to generate these, apparently despite the standard
-	SnapshotCache(SnapshotCache&& r) noexcept(true) : entries(std::move(r.entries)), arena(r.arena) {}
-	SnapshotCache& operator=(SnapshotCache&& r) noexcept(true) { entries = std::move(r.entries); arena = r.arena; return *this; }
+	SnapshotCache(SnapshotCache&& r) BOOST_NOEXCEPT : entries(std::move(r.entries)), arena(r.arena) {}
+	SnapshotCache& operator=(SnapshotCache&& r) BOOST_NOEXCEPT { entries = std::move(r.entries); arena = r.arena; return *this; }
 
 	bool empty() const {
 		// Returns true iff anything is known about the contents of the snapshot
@@ -331,7 +357,7 @@ public:
 
 	void dump() {
 		for( auto it = entries.begin(); it != entries.end(); ++it ) {
-			TraceEvent("CacheDump").detail("Begin", printable(it->beginKey)).detail("End", printable(it->endKey.toStandaloneStringRef())).detail("Values", printable(it->values));
+			TraceEvent("CacheDump").detail("Begin", it->beginKey).detail("End", it->endKey.toStandaloneStringRef()).detail("Values", it->values);
 		}
 	}
 

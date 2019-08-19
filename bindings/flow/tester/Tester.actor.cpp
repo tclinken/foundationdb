@@ -18,15 +18,17 @@
  * limitations under the License.
  */
 
-#include "fdbrpc/fdbrpc.h"
-#include "flow/DeterministicRandom.h"
-#include "bindings/flow/Tuple.h"
-#include "bindings/flow/FDBLoanerTypes.h"
-
 #include "Tester.actor.h"
+#include <cinttypes>
 #ifdef  __linux__
 #include <string.h>
 #endif
+
+#include "bindings/flow/Tuple.h"
+#include "bindings/flow/FDBLoanerTypes.h"
+#include "fdbrpc/fdbrpc.h"
+#include "flow/DeterministicRandom.h"
+#include "flow/actorcompiler.h" // This must be the last #include.
 
 // Otherwise we have to type setupNetwork(), FDB::open(), etc.
 using namespace FDB;
@@ -41,7 +43,8 @@ std::map<Standalone<StringRef>, Reference<Transaction>> trMap;
 const int ITERATION_PROGRESSION[] = { 256, 1000, 4096, 6144, 9216, 13824, 20736, 31104, 46656, 69984, 80000 };
 const int MAX_ITERATION = sizeof(ITERATION_PROGRESSION)/sizeof(int);
 
-static Future<Void> runTest(Reference<FlowTesterData> const& data, Reference<DatabaseContext> const& db, StringRef const& prefix);
+static Future<Void> runTest(Reference<FlowTesterData> const& data, Reference<Database> const& db,
+                            StringRef const& prefix);
 
 THREAD_FUNC networkThread( void* api ) {
 	// This is the fdb_flow network we're running on a thread
@@ -96,7 +99,7 @@ std::string tupleToString(Tuple const& tuple) {
 			if(type == Tuple::UTF8) {
 				str += "u";
 			}
-			str += "\'" + printable(tuple.getString(i)) + "\'";
+			str += "\'" + tuple.getString(i).printable() + "\'";
 		}
 		else if(type == Tuple::INT) {
 			str += format("%ld", tuple.getInt(i));
@@ -218,9 +221,10 @@ ACTOR static Future<Void> debugPrintRange(Reference<Transaction> tr, std::string
 		return Void();
 
 	Standalone<RangeResultRef> results = wait(getRange(tr, KeyRange(KeyRangeRef(subspace + '\x00', subspace + '\xff'))));
-	// printf("==================================================DB:%s:%s, count:%d\n", msg.c_str(), printable(subspace).c_str(), results.size());
+	printf("==================================================DB:%s:%s, count:%d\n", msg.c_str(),
+	       StringRef(subspace).printable().c_str(), results.size());
 	for (auto & s : results) {
-		// printf("=====key:%s, value:%s\n", printable(StringRef(s.key)).c_str(), printable(StringRef(s.value)).c_str());
+		printf("=====key:%s, value:%s\n", StringRef(s.key).printable().c_str(), StringRef(s.value).printable().c_str());
 	}
 
 	return Void();
@@ -290,7 +294,7 @@ ACTOR Future<Void> printFlowTesterStack(FlowTesterStack* stack) {
 	state int idx;
 	for (idx = stack->data.size() - 1; idx >= 0; --idx) {
 		Standalone<StringRef> value = wait(stack->data[idx].value);
-		// printf("==========stack item:%d, index:%d, value:%s\n", idx, stack->data[idx].index, printable(value).c_str());
+		// printf("==========stack item:%d, index:%d, value:%s\n", idx, stack->data[idx].index, value.printable().c_str());
 	}
 	return Void();
 }
@@ -353,7 +357,7 @@ struct PopFunc : InstructionFunc {
 	ACTOR static Future<Void> call(Reference<FlowTesterData> data, Reference<InstructionData> instruction) {
 		state std::vector<StackItem> items = data->stack.pop();
 		for(StackItem item : items) {
-			Standalone<StringRef> _ = wait(item.value);
+			wait(success(item.value));
 		}
 		return Void();
 	}
@@ -388,7 +392,7 @@ struct LogStackFunc : InstructionFunc {
 
 	ACTOR static Future<Void> logStack(Reference<FlowTesterData> data, std::map<int, StackItem> entries, Standalone<StringRef> prefix) {
 		loop {
-			state Reference<Transaction> tr(new Transaction(data->db));
+			state Reference<Transaction> tr = data->db->createTransaction();
 			try {
 				for(auto it : entries) {
 					Tuple tk;
@@ -534,7 +538,7 @@ struct NewTransactionFunc : InstructionFunc {
 	static const char* name;
 
 	static Future<Void> call(Reference<FlowTesterData> const& data, Reference<InstructionData> const& instruction) {
-		trMap[data->trName] = Reference<Transaction>(new Transaction(data->db));
+		trMap[data->trName] = data->db->createTransaction();
 		return Void();
 	}
 };
@@ -550,7 +554,7 @@ struct UseTransactionFunc : InstructionFunc {
 		data->trName = name;
 
 		if(trMap.count(data->trName) == 0) {
-			trMap[data->trName] = Reference<Transaction>(new Transaction(data->db));
+			trMap[data->trName] = data->db->createTransaction();
 		}
 		return Void();
 	}
@@ -681,7 +685,7 @@ struct SetReadVersionFunc : InstructionFunc {
 	static const char* name;
 
 	static Future<Void> call(Reference<FlowTesterData> const& data, Reference<InstructionData> const& instruction) {
-		instruction->tr->setVersion(data->lastVersion);
+		instruction->tr->setReadVersion(data->lastVersion);
 		return Void();
 	}
 };
@@ -700,6 +704,20 @@ struct GetCommittedVersionFunc : InstructionFunc {
 };
 const char* GetCommittedVersionFunc::name = "GET_COMMITTED_VERSION";
 REGISTER_INSTRUCTION_FUNC(GetCommittedVersionFunc);
+
+// GET_APPROXIMATE_SIZE
+struct GetApproximateSizeFunc : InstructionFunc {
+	static const char* name;
+
+	ACTOR static Future<Void> call(Reference<FlowTesterData> data, Reference<InstructionData> instruction) {
+		int64_t _ = wait(instruction->tr->getApproximateSize());
+		(void) _;  // disable unused variable warning
+		data->stack.pushTuple(LiteralStringRef("GOT_APPROXIMATE_SIZE"));
+		return Void();
+	}
+};
+const char* GetApproximateSizeFunc::name = "GET_APPROXIMATE_SIZE";
+REGISTER_INSTRUCTION_FUNC(GetApproximateSizeFunc);
 
 // GET_VERSIONSTAMP
 struct GetVersionstampFunc : InstructionFunc {
@@ -1028,7 +1046,7 @@ struct TuplePackFunc : InstructionFunc {
 		for (; i < items1.size(); ++i) {
 			Standalone<StringRef> str = wait(items1[i].value);
 			Tuple itemTuple = Tuple::unpack(str);
-			if(g_random->coinflip()) {
+			if(deterministicRandom()->coinflip()) {
 				Tuple::ElementType type = itemTuple.getType(0);
 				if(type == Tuple::NULL_TYPE) {
 					tuple.appendNull();
@@ -1117,7 +1135,7 @@ struct TupleRangeFunc : InstructionFunc {
 		for (; i < items1.size(); ++i) {
 			Standalone<StringRef> str = wait(items1[i].value);
 			Tuple itemTuple = Tuple::unpack(str);
-			if(g_random->coinflip()) {
+			if(deterministicRandom()->coinflip()) {
 				Tuple::ElementType type = itemTuple.getType(0);
 				if(type == Tuple::NULL_TYPE) {
 					tuple.appendNull();
@@ -1323,6 +1341,20 @@ struct StartThreadFunc : InstructionFunc {
 const char* StartThreadFunc::name = "START_THREAD";
 REGISTER_INSTRUCTION_FUNC(StartThreadFunc);
 
+ACTOR template <class Function>
+Future<decltype(fake<Function>()(Reference<ReadTransaction>()).getValue())> read(Reference<Database> db,
+                                                                                 Function func) {
+	state Reference<ReadTransaction> tr = db->createTransaction();
+	loop {
+		try {
+			state decltype(fake<Function>()(Reference<ReadTransaction>()).getValue()) result = wait(func(tr));
+			return result;
+		} catch (Error& e) {
+			wait(tr->onError(e));
+		}
+	}
+}
+
 // WAIT_EMPTY
 struct WaitEmptyFunc : InstructionFunc {
 	static const char* name;
@@ -1333,23 +1365,21 @@ struct WaitEmptyFunc : InstructionFunc {
 			return Void();
 
 		Standalone<StringRef> s1 = wait(items[0].value);
-		state Standalone<StringRef> prefix = Tuple::unpack(s1).getString(0);
+		Standalone<StringRef> prefix = Tuple::unpack(s1).getString(0);
 		// printf("=========WAIT_EMPTY:%s\n", printable(prefix).c_str());
 
-		state Reference<Transaction> tr(new Transaction(data->db));
-		loop {
-			try {
-				FDBStandalone<RangeResultRef> results = wait(tr->getRange(KeyRangeRef(prefix, strinc(prefix)), 1));
-				if(results.size() > 0) {
-					throw not_committed();
-				}
-				break;
-			}
-			catch(Error &e) {
-				wait(tr->onError(e));
-			}
-		}
+		wait(read(data->db,
+		          [=](Reference<ReadTransaction> tr) -> Future<Void> { return checkEmptyPrefix(tr, prefix); }));
 
+		return Void();
+	}
+
+private:
+	ACTOR static Future<Void> checkEmptyPrefix(Reference<ReadTransaction> tr, Standalone<StringRef> prefix) {
+		FDBStandalone<RangeResultRef> results = wait(tr->getRange(KeyRangeRef(prefix, strinc(prefix)), 1));
+		if (results.size() > 0) {
+			throw not_committed();
+		}
 		return Void();
 	}
 };
@@ -1529,7 +1559,32 @@ struct UnitTestsFunc : InstructionFunc {
 		}
 		API::selectAPIVersion(fdb->getAPIVersion());
 
-		state Reference<Transaction> tr(new Transaction(data->db));
+		const uint64_t locationCacheSize = 100001;
+		const uint64_t maxWatches = 10001;
+		const uint64_t timeout = 60*1000;
+		const uint64_t noTimeout = 0;
+		const uint64_t retryLimit = 50;
+		const uint64_t noRetryLimit = -1;
+		const uint64_t maxRetryDelay = 100;
+		const uint64_t sizeLimit = 100000;
+		const uint64_t maxFieldLength = 1000;
+
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_LOCATION_CACHE_SIZE, Optional<StringRef>(StringRef((const uint8_t*)&locationCacheSize, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_MAX_WATCHES, Optional<StringRef>(StringRef((const uint8_t*)&maxWatches, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_DATACENTER_ID, Optional<StringRef>(LiteralStringRef("dc_id")));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_MACHINE_ID, Optional<StringRef>(LiteralStringRef("machine_id")));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_SNAPSHOT_RYW_ENABLE);
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_SNAPSHOT_RYW_DISABLE);
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_LOGGING_MAX_FIELD_LENGTH, Optional<StringRef>(StringRef((const uint8_t*)&maxFieldLength, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_TIMEOUT, Optional<StringRef>(StringRef((const uint8_t*)&timeout, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_TIMEOUT, Optional<StringRef>(StringRef((const uint8_t*)&noTimeout, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_MAX_RETRY_DELAY, Optional<StringRef>(StringRef((const uint8_t*)&maxRetryDelay, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_SIZE_LIMIT, Optional<StringRef>(StringRef((const uint8_t*)&sizeLimit, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_RETRY_LIMIT, Optional<StringRef>(StringRef((const uint8_t*)&retryLimit, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_RETRY_LIMIT, Optional<StringRef>(StringRef((const uint8_t*)&noRetryLimit, 8)));
+		data->db->setDatabaseOption(FDBDatabaseOption::FDB_DB_OPTION_TRANSACTION_CAUSAL_READ_RISKY);
+
+		state Reference<Transaction> tr = data->db->createTransaction();
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_PRIORITY_SYSTEM_IMMEDIATE);
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_PRIORITY_SYSTEM_IMMEDIATE);
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_PRIORITY_BATCH);
@@ -1538,11 +1593,9 @@ struct UnitTestsFunc : InstructionFunc {
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_YOUR_WRITES_DISABLE);
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_READ_SYSTEM_KEYS);
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_ACCESS_SYSTEM_KEYS);
-		const uint64_t timeout = 60*1000;
+		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_TRANSACTION_LOGGING_MAX_FIELD_LENGTH, Optional<StringRef>(StringRef((const uint8_t*)&maxFieldLength, 8)));
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_TIMEOUT, Optional<StringRef>(StringRef((const uint8_t*)&timeout, 8)));
-		const uint64_t retryLimit = 50;
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_RETRY_LIMIT, Optional<StringRef>(StringRef((const uint8_t*)&retryLimit, 8)));
-		const uint64_t maxRetryDelay = 100;
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_MAX_RETRY_DELAY, Optional<StringRef>(StringRef((const uint8_t*)&maxRetryDelay, 8)));
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_USED_DURING_COMMIT_PROTECTION_DISABLE);
 		tr->setOption(FDBTransactionOption::FDB_TR_OPTION_TRANSACTION_LOGGING_ENABLE, Optional<StringRef>(LiteralStringRef("my_transaction")));
@@ -1560,7 +1613,7 @@ const char* UnitTestsFunc::name = "UNIT_TESTS";
 REGISTER_INSTRUCTION_FUNC(UnitTestsFunc);
 
 ACTOR static Future<Void> getInstructions(Reference<FlowTesterData> data, StringRef prefix) {
-	state Reference<Transaction> tr(new Transaction(data->db));
+	state Reference<Transaction> tr = data->db->createTransaction();
 
 	// get test instructions
 	state Tuple testSpec;
@@ -1602,7 +1655,7 @@ ACTOR static Future<Void> doInstructions(Reference<FlowTesterData> data) {
 				op = op.substr(0, op.size() - 9);
 
 			// printf("[==========]%ld/%ld:%s:%s: isDatabase:%d, isSnapshot:%d, stack count:%ld\n",
-				// idx, data->instructions.size(), printable(StringRef(data->instructions[idx].key)).c_str(), printable(StringRef(data->instructions[idx].value)).c_str(),
+				// idx, data->instructions.size(), StringRef(data->instructions[idx].key).printable().c_str(), StringRef(data->instructions[idx].value).printable().c_str(),
 				// isDatabase, isSnapshot, data->stack.data.size());
 
 			//wait(printFlowTesterStack(&(data->stack)));
@@ -1610,7 +1663,7 @@ ACTOR static Future<Void> doInstructions(Reference<FlowTesterData> data) {
 
 			state Reference<InstructionData> instruction = Reference<InstructionData>(new InstructionData(isDatabase, isSnapshot, data->instructions[idx].value, Reference<Transaction>()));
 			if (isDatabase) {
-				state Reference<Transaction> tr(new Transaction(data->db));
+				state Reference<Transaction> tr = data->db->createTransaction();
 				instruction->tr = tr;
 			}
 			else {
@@ -1644,7 +1697,7 @@ ACTOR static Future<Void> doInstructions(Reference<FlowTesterData> data) {
 	return Void();
 }
 
-ACTOR static Future<Void> runTest(Reference<FlowTesterData> data, Reference<DatabaseContext> db, StringRef prefix) {
+ACTOR static Future<Void> runTest(Reference<FlowTesterData> data, Reference<Database> db, StringRef prefix) {
 	ASSERT(data);
 	try {
 		data->db = db;
@@ -1693,7 +1746,7 @@ ACTOR void startTest(std::string clusterFilename, StringRef prefix, int apiVersi
 		populateOpsThatCreateDirectories(); // FIXME
 
 		// This is "our" network
-		g_network = newNet2(NetworkAddress(), false);
+		g_network = newNet2(false);
 
 		ASSERT(!API::isAPIVersionSelected());
 		try {
@@ -1736,15 +1789,15 @@ ACTOR void startTest(std::string clusterFilename, StringRef prefix, int apiVersi
 
 ACTOR void _test_versionstamp() {
 	try {
-		g_network = newNet2(NetworkAddress(), false);
+		g_network = newNet2(false);
 
-		API *fdb = FDB::API::selectAPIVersion(610);
+		API *fdb = FDB::API::selectAPIVersion(620);
 
 		fdb->setupNetwork();
 		startThread(networkThread, fdb);
 
 		auto db = fdb->createDatabase();
-		state Reference<Transaction> tr(new Transaction(db));
+		state Reference<Transaction> tr = db->createTransaction();
 
 		state Future<FDBStandalone<StringRef>> ftrVersion = tr->getVersionstamp();
 
@@ -1760,7 +1813,7 @@ ACTOR void _test_versionstamp() {
 
 		ASSERT(trVersion.compare(dbVersion) == 0);
 
-		fprintf(stderr, "%s\n", printable(trVersion).c_str());
+		fprintf(stderr, "%s\n", trVersion.printable().c_str());
 
 		g_network->stop();
 	}
@@ -1778,8 +1831,7 @@ int main( int argc, char** argv ) {
 	try {
 		platformInit();
 		registerCrashHandler();
-		g_random = new DeterministicRandom(1);
-		g_nondeterministic_random = new DeterministicRandom(platform::getRandomSeed());
+		setThreadLocalDeterministicRandomSeed(1);
 
 		// Get arguments
 		if (argc < 3) {

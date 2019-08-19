@@ -1,9 +1,29 @@
+/*
+ * WritesSkewedRangedReads.actor.cpp
+ *
+ * This source file is part of the FoundationDB open source project
+ *
+ * Copyright 2013-2018 Apple Inc. and the FoundationDB project authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "flow/actorcompiler.h"
 #include "flow/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/WorkerInterface.h"
-#include "workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/WorkerInterface.actor.h"
+#include "workloads.actor.h"
 #include "BulkSetup.actor.h"
 #include "fdbserver/ClusterRecruitmentInterface.h"
 #include "fdbclient/ReadYourWrites.h"
@@ -88,7 +108,7 @@ getInconsistentReadVersion(Database const& db)
 
 struct WritesSkewedRangedReadsWorkload : TestWorkload
 {
-    IRandom* common_tester_g_random;
+    Reference<IRandom> common_tester_g_random;
     uint64_t nodeCount;
     int64_t nodePrefix;
     int actorCount, keyCount, keyBytes, maxValueBytes, minValueBytes;
@@ -137,7 +157,7 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
     PerfIntCounter clearRewriteRangeTransactions, clearRewriteRangeRetries;
 
     vector<uint64_t> insertionCountsToMeasure;
-    vector<pair<uint64_t, double>> ratesAtKeyCounts;
+    vector<std::pair<uint64_t, double>> ratesAtKeyCounts;
 
     vector<PerfMetric> periodicMetrics;
 
@@ -165,7 +185,7 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
       , clearRewriteRangeRetries("Commit Range Retries")
       , readRangeLatencies(sampleSize)
     {
-        common_tester_g_random = new DeterministicRandom(sharedRandomNumber);
+        common_tester_g_random = Reference<IRandom>(new DeterministicRandom(sharedRandomNumber));
         bool discardEdgeMeasurements;
         std::string workloadName = "SkewedRandomRangedReadWrite";
 #ifndef GETOPTION
@@ -243,8 +263,8 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
 
         // Validate that keyForIndex() is monotonic
         for (int i = 0; i < 30; i++) {
-            int64_t a = g_random->randomInt64(0, nodeCount);
-            int64_t b = g_random->randomInt64(0, nodeCount);
+            int64_t a = deterministicRandom()->randomInt64(0, nodeCount);
+            int64_t b = deterministicRandom()->randomInt64(0, nodeCount);
             ASSERT((a < b) == (keyForIndex(a) < keyForIndex(b)));
         }
 
@@ -289,14 +309,14 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
         try {
             loop
             {
-	        ErrorOr<vector<std::pair<WorkerInterface, ProcessClass>>> workerList =
+	        ErrorOr<vector<WorkerDetails>> workerList =
                     wait(db->get().clusterInterface.getWorkers.tryGetReply(
                         GetWorkersRequest()));
                 if (workerList.present()) {
                     std::vector<Future<ErrorOr<Void>>> dumpRequests;
                     for (int i = 0; i < workerList.get().size(); i++)
                         dumpRequests.push_back(
-                            workerList.get()[i].first.traceBatchDumpRequest.tryGetReply(
+                            workerList.get()[i].interf.traceBatchDumpRequest.tryGetReply(
                                     TraceBatchDumpRequest()));
                     wait(waitForAll(dumpRequests));
                     return true;
@@ -415,7 +435,7 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
             false));
         m.insert(m.end(), periodicMetrics.begin(), periodicMetrics.end());
 
-        vector<pair<uint64_t, double>>::iterator ratesItr =
+        vector<std::pair<uint64_t, double>>::iterator ratesItr =
             ratesAtKeyCounts.begin();
         for (; ratesItr != ratesAtKeyCounts.end(); ratesItr++)
             m.push_back(PerfMetric(
@@ -426,7 +446,7 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
     Value randomValue()
     {
         return StringRef((uint8_t*)valueString.c_str(),
-                         g_random->randomInt(minValueBytes, maxValueBytes + 1));
+                         deterministicRandom()->randomInt(minValueBytes, maxValueBytes + 1));
     }
 
     Key keyForIndex(uint64_t index)
@@ -450,12 +470,12 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
     // Return random key with specified range
     KeyRange getRandomKeyRange(uint64_t sizeLimit)
     {
-        uint64_t startLocation = g_random->randomInt(0, nodeCount);
-        uint64_t scale = g_random->randomInt(0, g_random->randomInt(2, 5) *
-                                                    g_random->randomInt(2, 5));
+        uint64_t startLocation = deterministicRandom()->randomInt(0, nodeCount);
+        uint64_t scale = deterministicRandom()->randomInt(0, deterministicRandom()->randomInt(2, 5) *
+                                                    deterministicRandom()->randomInt(2, 5));
         uint64_t endLocation =
             startLocation +
-            g_random->randomInt(
+            deterministicRandom()->randomInt(
                 0, 1 + std::min(sizeLimit, std::min(nodeCount - startLocation,
                                                     (uint64_t)(1) << scale)));
 
@@ -700,7 +720,7 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
                               WritesSkewedRangedReadsWorkload* self)
     {
         state Promise<double> loadTime;
-        state Promise<vector<pair<uint64_t, double>>> ratesAtKeyCounts;
+        state Promise<vector<std::pair<uint64_t, double>>> ratesAtKeyCounts;
 
         wait(bulkSetup(cx, self, self->nodeCount, loadTime,
                            self->insertionCountsToMeasure.empty(),
@@ -718,7 +738,7 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
     {
         // Read one record from the database to warm the cache of keyServers
         state std::vector<int> keys;
-        keys.push_back(g_random->randomInt(0, self->nodeCount));
+        keys.push_back(deterministicRandom()->randomInt(0, self->nodeCount));
         state double startTime = now();
         loop
         {
@@ -867,8 +887,8 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
 
     int getRandomKey(int nodeCount, bool commonAcrossTesters = false)
     {
-        IRandom* my_g_random =
-            commonAcrossTesters ? common_tester_g_random : g_random;
+        Reference<IRandom> my_g_random =
+            commonAcrossTesters ? common_tester_g_random : deterministicRandom();
 
         if (forceHotProbability &&
             my_g_random->random01() < forceHotProbability)
@@ -921,9 +941,9 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
 
             if (!self->rampUpLoad ||
                 (currentSweep % 2 == 0 &&
-                 g_random->random01() <= numSweeps - currentSweep) ||
+                 deterministicRandom()->random01() <= numSweeps - currentSweep) ||
                 (currentSweep % 2 == 1 &&
-                 g_random->random01() <= 1 - (numSweeps - currentSweep))) {
+                 deterministicRandom()->random01() <= 1 - (numSweeps - currentSweep))) {
 
                 state Trans tr(cx);
                 ++self->rangedReadTransactions;
@@ -941,16 +961,16 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
                         int startKey, endKey;
                         for (auto op = 0; op < reads; op++) {
                             if (isSkewed) {
-                                int startAdd = g_random->randomInt(
+                                int startAdd = deterministicRandom()->randomInt(
                                     0, self->rangedReadSkewStartRange);
-                                int keyRange = g_random->randomInt(
+                                int keyRange = deterministicRandom()->randomInt(
                                     self->rangedReadMinKeyRange,
                                     self->rangedReadMaxKeyRange);
                                 startKey = actingSkewedKey + startAdd;
                                 endKey = startKey + keyRange;
                             } else {
                                 startKey = self->getRandomKey(self->nodeCount);
-                                int keyRange = g_random->randomInt(
+                                int keyRange = deterministicRandom()->randomInt(
                                     self->rangedReadMinKeyRange,
                                     self->rangedReadMaxKeyRange);
                                 endKey = startKey + keyRange;
@@ -1030,9 +1050,9 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
             }
             if (!self->rampUpLoad ||
                 (currentSweep % 2 == 0 &&
-                 g_random->random01() <= numSweeps - currentSweep) ||
+                 deterministicRandom()->random01() <= numSweeps - currentSweep) ||
                 (currentSweep % 2 == 1 &&
-                 g_random->random01() <= 1 - (numSweeps - currentSweep))) {
+                 deterministicRandom()->random01() <= 1 - (numSweeps - currentSweep))) {
                 state Trans tr(cx);
                 ++self->clearRewriteRangeTransactions;
                 debugID = UID();
@@ -1041,19 +1061,21 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
                     try {
                         Version v = wait(tr.getReadVersion());
                         state double clearStart = now();
-                        int startKey, endKey, numKeys;
+                        state int startKey;
+                        state int endKey;
+                        state int numKeys;
                         numKeys =
-                            g_random->randomInt(self->rangedWriteMinKeyRange,
+                            deterministicRandom()->randomInt(self->rangedWriteMinKeyRange,
                                                 self->rangedWriteMaxKeyRange);
                         if (isSkewed) {
                             int skewedReadKeyId = 0;
                             if (self->rangedReadSkewNumHotSpots > 1) {
-                                skewedReadKeyId = g_random->randomInt(
+                                skewedReadKeyId = deterministicRandom()->randomInt(
                                     0, self->rangedReadSkewNumHotSpots - 1);
                             }
                             int skewedReadKey =
                                 actingSkewedKeys[skewedReadKeyId];
-                            startKey = g_random->randomInt(
+                            startKey = deterministicRandom()->randomInt(
                                 0,
                                 std::max(0, skewedReadKey -
                                                 self->rangedWriteMinKeyRange -
@@ -1066,16 +1088,16 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
                             KeyRangeRef(self->keyForIndex(
                                             startKey), // must be standalone???
                                         self->keyForIndex(endKey));
-                        vector<Value> values;
+                        state vector<Value> values;
                         for (int i = 0; i < numKeys; i++) {
                             values.push_back(self->randomValue());
                         }
                         if (!self->rangedWriteBlind) {
-                            logLatency(
+                            wait(logLatency(
                                 tr.getRange(keyRange,
                                             GetRangeLimits(-1, 1000000)),
                                 &self->readLatencies, &self->readLatencyTotal,
-                                &self->readLatencyCount, self->shouldRecord());
+                                &self->readLatencyCount, self->shouldRecord()));
                         }
                         tr.clear(keyRange);
                         // write new values in that range
@@ -1122,11 +1144,11 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
 
             if (!self->rampUpLoad ||
                 (currentSweep % 2 == 0 &&
-                 g_random->random01() <= numSweeps - currentSweep) ||
+                 deterministicRandom()->random01() <= numSweeps - currentSweep) ||
                 (currentSweep % 2 == 1 &&
-                 g_random->random01() <= 1 - (numSweeps - currentSweep))) {
+                 deterministicRandom()->random01() <= 1 - (numSweeps - currentSweep))) {
                 state double tstart = now();
-                state bool aTransaction = g_random->random01() > self->alpha;
+                state bool aTransaction = deterministicRandom()->random01() > self->alpha;
 
                 state vector<int> keys;
                 state vector<Value> values;
@@ -1155,13 +1177,13 @@ struct WritesSkewedRangedReadsWorkload : TestWorkload
                                           extra_write_conflict_ranges;
                      op++)
                     extra_ranges.push_back(
-                        singleKeyRange(g_random->randomUniqueID().toString()));
+                        singleKeyRange(deterministicRandom()->randomUniqueID().toString()));
 
                 state Trans tr(cx);
                 if (tstart - self->clientBegin > self->debugTime &&
                     tstart - self->clientBegin <=
                         self->debugTime + self->debugInterval) {
-                    debugID = g_random->randomUniqueID();
+                    debugID = deterministicRandom()->randomUniqueID();
                     tr.debugTransaction(debugID);
                     g_traceBatch.addEvent(
                         "TransactionDebug", debugID.first(),

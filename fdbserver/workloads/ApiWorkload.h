@@ -22,7 +22,7 @@
 #define FDBSERVER_APIWORKLOAD_H
 #pragma once
 
-#include "fdbserver/workloads/workloads.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbclient/ReadYourWrites.h"
 #include "fdbclient/ThreadSafeTransaction.h"
 #include "fdbserver/workloads/MemoryKeyValueStore.h"
@@ -90,7 +90,7 @@ struct FlowTransactionWrapper : public TransactionWrapper {
 	T transaction;
 	T lastTransaction;
 	FlowTransactionWrapper(Database cx, Database extraDB, bool useExtraDB) : cx(cx), extraDB(extraDB), useExtraDB(useExtraDB), transaction(cx) {
-		if(useExtraDB && g_random->random01() < 0.5) {
+		if(useExtraDB && deterministicRandom()->random01() < 0.5) {
 			transaction = T(extraDB);
 		}
 	}
@@ -141,7 +141,7 @@ struct FlowTransactionWrapper : public TransactionWrapper {
 		Future<Void> returnVal = transaction.onError(e);
 		if( useExtraDB ) {
 			lastTransaction = std::move(transaction);
-			transaction = T( g_random->random01() < 0.5 ? extraDB : cx );
+			transaction = T( deterministicRandom()->random01() < 0.5 ? extraDB : cx );
 		}
 		return returnVal;
 	}

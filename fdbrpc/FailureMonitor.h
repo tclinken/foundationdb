@@ -25,6 +25,7 @@
 #include "flow/flow.h"
 #include "flow/IndexedSet.h"
 #include "fdbrpc/FlowTransport.h" // Endpoint
+#include <unordered_map>
 
 using std::vector;
 
@@ -83,13 +84,16 @@ public:
 	// Returns the currently known status for the endpoint
 	virtual FailureStatus getState( Endpoint const& endpoint ) = 0;
 
+	// Returns the currently known status for the address
+	virtual FailureStatus getState( NetworkAddress const& address ) = 0;
+
 	// Only use this function when the endpoint is known to be failed
 	virtual void endpointNotFound( Endpoint const& ) = 0;
 
 	// The next time the known status for the endpoint changes, returns the new status.
 	virtual Future<Void> onStateChanged( Endpoint const& endpoint ) = 0;
 
-	// Returns when onFailed(endpoint) || transport().onDisconnect( endpoint.address ), but more efficiently
+	// Returns when onFailed(endpoint) || transport().onDisconnect( endpoint.getPrimaryAddress() ), but more efficiently
 	virtual Future<Void> onDisconnectOrFailure( Endpoint const& endpoint ) = 0;
 
 	// Returns true if the endpoint is failed but the address of the endpoint is not failed.
@@ -101,6 +105,9 @@ public:
 	// Called by FlowTransport when a connection closes and a prior request or reply might be lost
 	virtual void notifyDisconnect( NetworkAddress const& ) = 0;
 
+	// Called to update the failure status of network address directly when running client.
+	virtual void setStatus(NetworkAddress const& address, FailureStatus const& status) = 0;
+
 	// Returns when the known status of endpoint is next equal to status.  Returns immediately
 	//   if appropriate.
 	Future<Void> onStateEqual( Endpoint const& endpoint, FailureStatus status );
@@ -110,16 +117,19 @@ public:
 		return onStateEqual( endpoint, FailureStatus() );
 	}
 
-	static IFailureMonitor& failureMonitor() { return *static_cast<IFailureMonitor*>((void*) g_network->global(INetwork::enFailureMonitor)); }
-	// Returns the failure monitor that the calling machine should use
-
 	// Returns when the status of the given endpoint has continuously been "failed" for sustainedFailureDuration + (elapsedTime*sustainedFailureSlope)
 	Future<Void> onFailedFor( Endpoint const& endpoint, double sustainedFailureDuration, double sustainedFailureSlope = 0.0 );
+
+	// Returns the failure monitor that the calling machine should use
+	static IFailureMonitor& failureMonitor() {
+		return *static_cast<IFailureMonitor*>((void*)g_network->global(INetwork::enFailureMonitor));
+	}
 };
 
 // SimpleFailureMonitor is the sole implementation of IFailureMonitor.  It has no
 //   failure detection logic; it just implements the interface and reacts to setStatus() etc.
 // Initially all addresses are considered failed, but all endpoints of a non-failed address are considered OK.
+
 class SimpleFailureMonitor : public IFailureMonitor {
 public:
 	SimpleFailureMonitor() : endpointKnownFailed() { }
@@ -129,13 +139,14 @@ public:
 
 	virtual Future<Void> onStateChanged( Endpoint const& endpoint );
 	virtual FailureStatus getState( Endpoint const& endpoint );
+	virtual FailureStatus getState( NetworkAddress const& address );
 	virtual Future<Void> onDisconnectOrFailure( Endpoint const& endpoint );
 	virtual bool onlyEndpointFailed( Endpoint const& endpoint );
 	virtual bool permanentlyFailed( Endpoint const& endpoint );
 
 	void reset();
 private:
-	Map< NetworkAddress, FailureStatus > addressStatus;
+	std::unordered_map< NetworkAddress, FailureStatus > addressStatus;
 	YieldedAsyncMap< Endpoint, bool > endpointKnownFailed;
 
 	friend class OnStateChangedActorActor;

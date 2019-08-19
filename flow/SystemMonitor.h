@@ -29,14 +29,15 @@ struct SystemMonitorMachineState {
 	Optional<std::string> folder;
 	Optional<Standalone<StringRef>> zoneId;
 	Optional<Standalone<StringRef>> machineId;
-	Optional<uint32_t> ip;
+	Optional<IPAddress> ip;
 
 	double monitorStartTime;
 
 	SystemMonitorMachineState() : monitorStartTime(0) {}
-	SystemMonitorMachineState(uint32_t ip) : ip(ip), monitorStartTime(0) {}
-	SystemMonitorMachineState(std::string folder, Optional<Standalone<StringRef>> zoneId, Optional<Standalone<StringRef>> machineId, uint32_t ip) 
-		: folder(folder), zoneId(zoneId), machineId(machineId), ip(ip), monitorStartTime(0) {}
+	explicit SystemMonitorMachineState(const IPAddress& ip) : ip(ip), monitorStartTime(0) {}
+	SystemMonitorMachineState(std::string folder, Optional<Standalone<StringRef>> zoneId,
+	                          Optional<Standalone<StringRef>> machineId, const IPAddress& ip)
+	  : folder(folder), zoneId(zoneId), machineId(machineId), ip(ip), monitorStartTime(0) {}
 };
 
 void initializeSystemMonitorMachineState(SystemMonitorMachineState machineState);
@@ -73,6 +74,9 @@ struct NetworkData {
 	int64_t countFileCachePageReadsMerged;
 	int64_t countFileCacheFinds;
 	int64_t countFileCacheReadBytes;
+	int64_t countFilePageCacheHits;
+	int64_t countFilePageCacheMisses;
+	int64_t countFilePageCacheEvictions;
 	int64_t countConnEstablished;
 	int64_t countConnClosedWithError;
 	int64_t countConnClosedWithoutError;
@@ -120,6 +124,9 @@ struct NetworkData {
 		countFileCachePageReadsMerged = getValue(LiteralStringRef("AsyncFile.CountCachePageReadsMerged"));
 		countFileCacheFinds = getValue(LiteralStringRef("AsyncFile.CountCacheFinds"));
 		countFileCacheReadBytes = getValue(LiteralStringRef("AsyncFile.CountCacheReadBytes"));
+		countFilePageCacheHits = getValue(LiteralStringRef("AsyncFile.CountCachePageReadsHit"));
+		countFilePageCacheMisses = getValue(LiteralStringRef("AsyncFile.CountCachePageReadsMissed"));
+		countFilePageCacheEvictions = getValue(LiteralStringRef("EvictablePageCache.CacheEvictions"));
 	}
 };
 
@@ -133,5 +140,6 @@ struct StatisticsState {
 
 void systemMonitor();
 SystemStatistics customSystemMonitor(std::string eventName, StatisticsState *statState, bool machineMetrics = false);
+SystemStatistics getSystemStatistics();
 
 #endif /* FLOW_SYSTEM_MONITOR_H */

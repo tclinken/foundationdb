@@ -19,12 +19,12 @@
  */
 
 #include "fdbserver/RestoreInterface.h"
-#include "fdbclient/NativeAPI.h"
+#include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/SystemData.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 ACTOR Future<Void> restoreWorker(Reference<ClusterConnectionFile> ccf, LocalityData locality) {
-	state Database cx = Database::createDatabase(ccf->getFilename(), Database::API_VERSION_LATEST,locality);
+	state Database cx = Database::createDatabase(ccf->getFilename(), Database::API_VERSION_LATEST, true, locality);
 	state RestoreInterface interf;
 	interf.initEndpoints();
 	state Optional<RestoreInterface> leaderInterf;

@@ -18,6 +18,8 @@
  * limitations under the License.
  */
 
+#include <cinttypes>
+
 #include "fdbrpc/simulator.h"
 #include "flow/IThreadPool.h"
 #include "flow/Util.h"
@@ -32,16 +34,15 @@
 #include "fdbrpc/Replication.h"
 #include "fdbrpc/ReplicationUtils.h"
 #include "fdbrpc/AsyncFileWriteChecker.h"
+#include "flow/actorcompiler.h"  // This must be the last #include.
 
 bool simulator_should_inject_fault( const char* context, const char* file, int line, int error_code ) {
 	if (!g_network->isSimulated()) return false;
 
 	auto p = g_simulator.getCurrentProcess();
 
-	if (p->fault_injection_p2 && g_random->random01() < p->fault_injection_p2 && !g_simulator.speedUpSimulation) {
-		uint32_t
-			h1 = line + (p->fault_injection_r>>32),
-			h2 = p->fault_injection_r;
+	if (p->fault_injection_p2 && deterministicRandom()->random01() < p->fault_injection_p2 && !g_simulator.speedUpSimulation) {
+		uint32_t h1 = line + (p->fault_injection_r >> 32);
 
 		if (h1 < p->fault_injection_p1*std::numeric_limits<uint32_t>::max()) {
 			TEST(true);                                     // A fault was injected
@@ -61,20 +62,20 @@ bool simulator_should_inject_fault( const char* context, const char* file, int l
 
 void ISimulator::displayWorkers() const
 {
-	std::map<std::string, std::vector<ISimulator::ProcessInfo*>>	zoneMap;
+	std::map<std::string, std::vector<ISimulator::ProcessInfo*>> machineMap;
 
-	// Create a map of zone Id
+	// Create a map of machine Id
 	for (auto processInfo : getAllProcesses()) {
 		std::string dataHall = processInfo->locality.dataHallId().present() ? processInfo->locality.dataHallId().get().printable() : "[unset]";
-		std::string zoneId = processInfo->locality.zoneId().present() ? processInfo->locality.zoneId().get().printable() : "[unset]";
-		zoneMap[format("%-8s  %s", dataHall.c_str(), zoneId.c_str())].push_back(processInfo);
+		std::string machineId = processInfo->locality.machineId().present() ? processInfo->locality.machineId().get().printable() : "[unset]";
+		machineMap[format("%-8s  %s", dataHall.c_str(), machineId.c_str())].push_back(processInfo);
 	}
 
-	printf("DataHall  ZoneId\n");
+	printf("DataHall  MachineId\n");
 	printf("                  Address   Name      Class        Excluded Failed Rebooting Cleared Role                                              DataFolder\n");
-	for (auto& zoneRecord : zoneMap) {
-		printf("\n%s\n", zoneRecord.first.c_str());
-		for (auto& processInfo : zoneRecord.second) {
+	for (auto& machineRecord : machineMap) {
+		printf("\n%s\n", machineRecord.first.c_str());
+		for (auto& processInfo : machineRecord.second) {
 			printf("                  %9s %-10s%-13s%-8s %-6s %-9s %-8s %-48s %-40s\n",
 			processInfo->address.toString().c_str(), processInfo->name, processInfo->startingClass.toString().c_str(), (processInfo->isExcluded() ? "True" : "False"), (processInfo->failed ? "True" : "False"), (processInfo->rebooting ? "True" : "False"), (processInfo->isCleared() ? "True" : "False"), getRoles(processInfo->address).c_str(), processInfo->dataFolder);
 		}
@@ -99,7 +100,6 @@ bool onlyBeforeSimulatorInit() {
 }
 
 const UID TOKEN_ENDPOINT_NOT_FOUND(-1, -1);
-const uint64_t TOKEN_STREAM_FLAG = 1;
 
 ISimulator* g_pSimulator = 0;
 thread_local ISimulator::ProcessInfo* ISimulator::currentProcess = 0;
@@ -134,30 +134,31 @@ struct SimClogging {
 		return t - tnow;
 	}
 
-	void clogPairFor( uint32_t from, uint32_t to, double t ) {
+	void clogPairFor(const IPAddress& from, const IPAddress& to, double t) {
 		auto& u = clogPairUntil[ std::make_pair( from, to ) ];
 		u = std::max(u, now() + t);
 	}
-	void clogSendFor( uint32_t from, double t ) {
+	void clogSendFor(const IPAddress& from, double t) {
 		auto& u = clogSendUntil[from];
 		u = std::max(u, now() + t);
 	}
-	void clogRecvFor( uint32_t from, double t ) {
+	void clogRecvFor(const IPAddress& from, double t) {
 		auto& u = clogRecvUntil[from];
 		u = std::max(u, now() + t);
 	}
-	double setPairLatencyIfNotSet( uint32_t from, uint32_t to, double t ) {
+	double setPairLatencyIfNotSet(const IPAddress& from, const IPAddress& to, double t) {
 		auto i = clogPairLatency.find( std::make_pair(from,to) );
 		if (i == clogPairLatency.end())
 			i = clogPairLatency.insert( std::make_pair( std::make_pair(from,to), t ) ).first;
 		return i->second;
 	}
+
 private:
-	std::map< uint32_t, double > clogSendUntil, clogRecvUntil;
-	std::map< std::pair<uint32_t, uint32_t>, double > clogPairUntil;
-	std::map< std::pair<uint32_t, uint32_t>, double > clogPairLatency;
+	std::map<IPAddress, double> clogSendUntil, clogRecvUntil;
+	std::map<std::pair<IPAddress, IPAddress>, double> clogPairUntil;
+	std::map<std::pair<IPAddress, IPAddress>, double> clogPairLatency;
 	double halfLatency() {
-		double a = g_random->random01();
+		double a = deterministicRandom()->random01();
 		const double pFast = 0.999;
 		if (a <= pFast) {
 			a = a / pFast;
@@ -173,7 +174,7 @@ SimClogging g_clogging;
 
 struct Sim2Conn : IConnection, ReferenceCounted<Sim2Conn> {
 	Sim2Conn( ISimulator::ProcessInfo* process )
-		: process(process), dbgid( g_random->randomUniqueID() ), opened(false), closedByCaller(false)
+		: process(process), dbgid( deterministicRandom()->randomUniqueID() ), opened(false), closedByCaller(false), stopReceive(Never())
 	{
 		pipes = sender(this) && receiver(this);
 	}
@@ -186,8 +187,8 @@ struct Sim2Conn : IConnection, ReferenceCounted<Sim2Conn> {
 		this->peerEndpoint = peerEndpoint;
 
 		// Every one-way connection gets a random permanent latency and a random send buffer for the duration of the connection
-		auto latency = g_clogging.setPairLatencyIfNotSet( peerProcess->address.ip, process->address.ip, FLOW_KNOBS->MAX_CLOGGING_LATENCY*g_random->random01() );
-		sendBufSize = std::max<double>( g_random->randomInt(0, 5000000), 25e6 * (latency + .002) );
+		auto latency = g_clogging.setPairLatencyIfNotSet( peerProcess->address.ip, process->address.ip, FLOW_KNOBS->MAX_CLOGGING_LATENCY*deterministicRandom()->random01() );
+		sendBufSize = std::max<double>( deterministicRandom()->randomInt(0, 5000000), 25e6 * (latency + .002) );
 		TraceEvent("Sim2Connection").detail("SendBufSize", sendBufSize).detail("Latency", latency);
 	}
 
@@ -208,6 +209,7 @@ struct Sim2Conn : IConnection, ReferenceCounted<Sim2Conn> {
 
 	void peerClosed() {
 		leakedConnectionTracker = trackLeakedConnection(this);
+		stopReceive = delay(1.0);
 	}
 
 	// Reads as many bytes as possible from the read buffer into [begin,end) and returns the number of bytes read (might be 0)
@@ -245,7 +247,7 @@ struct Sim2Conn : IConnection, ReferenceCounted<Sim2Conn> {
 			}
 		}
 		ASSERT(toSend);
-		if (BUGGIFY) toSend = std::min(toSend, g_random->randomInt(0, 1000));
+		if (BUGGIFY) toSend = std::min(toSend, deterministicRandom()->randomInt(0, 1000));
 
 		if (!peer) return toSend;
 		toSend = std::min( toSend, peer->availableSendBufferForPeer() );
@@ -284,6 +286,7 @@ private:
 	Future<Void> leakedConnectionTracker;
 
 	Future<Void> pipes;
+	Future<Void> stopReceive;
 
 	int availableSendBufferForPeer() const { return sendBufSize - (writtenBytes.get() - receivedBytes.get()); }  // SOMEDAY: acknowledgedBytes instead of receivedBytes
 
@@ -299,7 +302,7 @@ private:
 		loop {
 			wait( self->writtenBytes.onChange() );  // takes place on peer!
 			ASSERT( g_simulator.getCurrentProcess() == self->peerProcess );
-			wait( delay( .002 * g_random->random01() ) );
+			wait( delay( .002 * deterministicRandom()->random01() ) );
 			self->sentBytes.set( self->writtenBytes.get() );  // or possibly just some sometimes...
 		}
 	}
@@ -310,12 +313,15 @@ private:
 			while ( self->sentBytes.get() == self->receivedBytes.get() )
 				wait( self->sentBytes.onChange() );
 			ASSERT( g_simulator.getCurrentProcess() == self->peerProcess );
-			state int64_t pos = g_random->random01() < .5 ? self->sentBytes.get() : g_random->randomInt64( self->receivedBytes.get(), self->sentBytes.get()+1 );
+			state int64_t pos = deterministicRandom()->random01() < .5 ? self->sentBytes.get() : deterministicRandom()->randomInt64( self->receivedBytes.get(), self->sentBytes.get()+1 );
 			wait( delay( g_clogging.getSendDelay( self->process->address, self->peerProcess->address ) ) );
 			wait( g_simulator.onProcess( self->process ) );
 			ASSERT( g_simulator.getCurrentProcess() == self->process );
 			wait( delay( g_clogging.getRecvDelay( self->process->address, self->peerProcess->address ) ) );
 			ASSERT( g_simulator.getCurrentProcess() == self->process );
+			if(self->stopReceive.isReady()) {
+				wait(Future<Void>(Never()));
+			}
 			self->receivedBytes.set( pos );
 			wait( Future<Void>(Void()) );  // Prior notification can delete self and cancel this actor
 			ASSERT( g_simulator.getCurrentProcess() == self->process );
@@ -359,9 +365,9 @@ private:
 	}
 
 	void rollRandomClose() {
-		if (now() - g_simulator.lastConnectionFailure > g_simulator.connectionFailuresDisableDuration && g_random->random01() < .00001) {
+		if (now() - g_simulator.lastConnectionFailure > g_simulator.connectionFailuresDisableDuration && deterministicRandom()->random01() < .00001) {
 			g_simulator.lastConnectionFailure = now();
-			double a = g_random->random01(), b = g_random->random01();
+			double a = deterministicRandom()->random01(), b = deterministicRandom()->random01();
 			TEST(true);  // Simulated connection failure
 			TraceEvent("ConnectionFailure", dbgid).detail("MyAddr", process->address).detail("PeerAddr", peerProcess->address).detail("SendClosed", a > .33).detail("RecvClosed", a < .66).detail("Explicit", b < .3);
 			if (a < .66 && peer) peer->closeInternal();
@@ -374,9 +380,17 @@ private:
 
 	ACTOR static Future<Void> trackLeakedConnection( Sim2Conn* self ) {
 		wait( g_simulator.onProcess( self->process ) );
-		// SOMEDAY: Make this value variable? Dependent on buggification status?
-		wait( delay( 20.0 ) );
-		TraceEvent(SevError, "LeakedConnection", self->dbgid).error(connection_leaked()).detail("MyAddr", self->process->address).detail("PeerAddr", self->peerEndpoint).detail("PeerId", self->peerId).detail("Opened", self->opened);
+		if (self->process->address.isPublic()) {
+			wait( delay( FLOW_KNOBS->CONNECTION_MONITOR_IDLE_TIMEOUT * FLOW_KNOBS->CONNECTION_MONITOR_IDLE_TIMEOUT * 1.5 ) );
+		} else {
+			wait( delay( FLOW_KNOBS->CONNECTION_MONITOR_IDLE_TIMEOUT * 1.5 ) );
+		}
+		TraceEvent(SevError, "LeakedConnection", self->dbgid)
+		    .error(connection_leaked())
+		    .detail("MyAddr", self->process->address)
+		    .detail("PeerAddr", self->peerEndpoint)
+		    .detail("PeerId", self->peerId)
+		    .detail("Opened", self->opened);
 		return Void();
 	}
 };
@@ -388,6 +402,7 @@ int sf_open( const char* filename, int flags, int convFlags, int mode );
 
 #if defined(_WIN32)
 #include <io.h>
+#define O_CLOEXEC 0
 
 #elif defined(__unixish__)
 #define _open ::open
@@ -416,7 +431,7 @@ public:
 	ACTOR static Future<Reference<IAsyncFile>> open( std::string filename, int flags, int mode,
 													Reference<DiskParameters> diskParameters = Reference<DiskParameters>(new DiskParameters(25000, 150000000)), bool delayOnWrite = true ) {
 		state ISimulator::ProcessInfo* currentProcess = g_simulator.getCurrentProcess();
-		state int currentTaskID = g_network->getCurrentTask();
+		state TaskPriority currentTaskID = g_network->getCurrentTask();
 
 		if(++openCount >= 3000) {
 			TraceEvent(SevError, "TooManyFiles");
@@ -429,9 +444,13 @@ public:
 			g_simulator.connectionFailuresDisableDuration = 1e6;
 		}
 
+		// Filesystems on average these days seem to start to have limits of around 255 characters for a
+		// filename.  We add ".part" below, so we need to stay under 250.
+		ASSERT( basename(filename).size() < 250 );
+
 		wait( g_simulator.onMachine( currentProcess ) );
 		try {
-			wait( delay(FLOW_KNOBS->MIN_OPEN_TIME + g_random->random01() * (FLOW_KNOBS->MAX_OPEN_TIME - FLOW_KNOBS->MIN_OPEN_TIME) ) );
+			wait( delay(FLOW_KNOBS->MIN_OPEN_TIME + deterministicRandom()->random01() * (FLOW_KNOBS->MAX_OPEN_TIME - FLOW_KNOBS->MIN_OPEN_TIME) ) );
 
 			std::string open_filename = filename;
 			if (flags & OPEN_ATOMIC_WRITE_AND_CREATE) {
@@ -507,10 +526,10 @@ private:
 	bool delayOnWrite;
 
 	SimpleFile(int h, Reference<DiskParameters> diskParameters, bool delayOnWrite, const std::string& filename, const std::string& actualFilename, int flags)
-		: h(h), diskParameters(diskParameters), delayOnWrite(delayOnWrite), filename(filename), actualFilename(actualFilename), dbgId(g_random->randomUniqueID()), flags(flags) {}
+		: h(h), diskParameters(diskParameters), delayOnWrite(delayOnWrite), filename(filename), actualFilename(actualFilename), dbgId(deterministicRandom()->randomUniqueID()), flags(flags) {}
 
 	static int flagConversion( int flags ) {
-		int outFlags = O_BINARY;
+		int outFlags = O_BINARY | O_CLOEXEC;
 		if( flags&OPEN_READWRITE ) outFlags |= O_RDWR;
 		if( flags&OPEN_CREATE ) outFlags |= O_CREAT;
 		if( flags&OPEN_READONLY ) outFlags |= O_RDONLY;
@@ -521,9 +540,11 @@ private:
 	}
 
 	ACTOR static Future<int> read_impl( SimpleFile* self, void* data, int length, int64_t offset ) {
-		state UID opId = g_random->randomUniqueID();
+		ASSERT( ( self->flags & IAsyncFile::OPEN_NO_AIO ) != 0 ||
+		        ( (uintptr_t)data % 4096 == 0 && length % 4096 == 0 && offset % 4096 == 0 ) );  // Required by KAIO.
+		state UID opId = deterministicRandom()->randomUniqueID();
 		if (randLog)
-			fprintf( randLog, "SFR1 %s %s %s %d %lld\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), length, offset );
+			fprintf( randLog, "SFR1 %s %s %s %d %" PRId64 "\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), length, offset );
 
 		wait( waitUntilDiskReady( self->diskParameters, length ) );
 
@@ -553,11 +574,11 @@ private:
 	}
 
 	ACTOR static Future<Void> write_impl( SimpleFile* self, StringRef data, int64_t offset ) {
-		state UID opId = g_random->randomUniqueID();
+		state UID opId = deterministicRandom()->randomUniqueID();
 		if (randLog) {
 			uint32_t a=0, b=0;
 			hashlittle2( data.begin(), data.size(), &a, &b );
-			fprintf( randLog, "SFW1 %s %s %s %d %d %lld\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), a, data.size(), offset );
+			fprintf( randLog, "SFW1 %s %s %s %d %d %" PRId64 "\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), a, data.size(), offset );
 		}
 
 		if(self->delayOnWrite)
@@ -592,15 +613,20 @@ private:
 	}
 
 	ACTOR static Future<Void> truncate_impl( SimpleFile* self, int64_t size ) {
-		state UID opId = g_random->randomUniqueID();
+		state UID opId = deterministicRandom()->randomUniqueID();
 		if (randLog)
-			fprintf( randLog, "SFT1 %s %s %s %lld\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), size );
+			fprintf( randLog, "SFT1 %s %s %s %" PRId64 "\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), size );
+
+		if (size == 0) {
+			// KAIO will return EINVAL, as len==0 is an error.
+			throw io_error();
+		}
 
 		if(self->delayOnWrite)
 			wait( waitUntilDiskReady( self->diskParameters, 0 ) );
 
 		if( _chsize( self->h, (long) size ) == -1 ) {
-			TraceEvent(SevWarn, "SimpleFileIOError").detail("Location", 6);
+			TraceEvent(SevWarn, "SimpleFileIOError").detail("Location", 6).detail("Filename", self->filename).detail("Size", size).detail("Fd", self->h).GetLastError();
 			throw io_error();
 		}
 
@@ -614,7 +640,7 @@ private:
 	}
 
 	ACTOR static Future<Void> sync_impl( SimpleFile* self ) {
-		state UID opId = g_random->randomUniqueID();
+		state UID opId = deterministicRandom()->randomUniqueID();
 		if (randLog)
 			fprintf( randLog, "SFC1 %s %s %s\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str());
 
@@ -647,7 +673,7 @@ private:
 	}
 
 	ACTOR static Future<int64_t> size_impl( SimpleFile* self ) {
-		state UID opId = g_random->randomUniqueID();
+		state UID opId = deterministicRandom()->randomUniqueID();
 		if (randLog)
 			fprintf(randLog, "SFS1 %s %s %s\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str());
 
@@ -660,7 +686,7 @@ private:
 		}
 
 		if (randLog)
-			fprintf(randLog, "SFS2 %s %s %s %lld\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), pos);
+			fprintf(randLog, "SFS2 %s %s %s %" PRId64 "\n", self->dbgId.shortString().c_str(), self->filename.c_str(), opId.shortString().c_str(), pos);
 		INJECT_FAULT( io_error, "SimpleFile::size" );
 
 		return pos;
@@ -676,7 +702,10 @@ struct SimDiskSpace {
 void doReboot( ISimulator::ProcessInfo* const& p, ISimulator::KillType const& kt );
 
 struct Sim2Listener : IListener, ReferenceCounted<Sim2Listener> {
-	explicit Sim2Listener( ISimulator::ProcessInfo* process ) : process(process) {}
+	explicit Sim2Listener( ISimulator::ProcessInfo* process, const NetworkAddress& listenAddr )
+		: process(process),
+	      address(listenAddr) {}
+
 	void incomingConnection( double seconds, Reference<IConnection> conn ) {  // Called by another process!
 		incoming( Reference<Sim2Listener>::addRef( this ), seconds, conn );
 	}
@@ -688,7 +717,7 @@ struct Sim2Listener : IListener, ReferenceCounted<Sim2Listener> {
 		return popOne( nextConnection.getFuture() );
 	}
 
-	virtual NetworkAddress getListenAddress() { return process->address; }
+	virtual NetworkAddress getListenAddress() { return address; }
 
 private:
 	ISimulator::ProcessInfo* process;
@@ -697,9 +726,11 @@ private:
 	ACTOR static void incoming( Reference<Sim2Listener> self, double seconds, Reference<IConnection> conn ) {
 		wait( g_simulator.onProcess(self->process) );
 		wait( delay( seconds ) );
-		if (((Sim2Conn*)conn.getPtr())->isPeerGone() && g_random->random01()<0.5)
+		if (((Sim2Conn*)conn.getPtr())->isPeerGone() && deterministicRandom()->random01()<0.5)
 			return;
-		TraceEvent("Sim2IncomingConn", conn->getDebugID());
+		TraceEvent("Sim2IncomingConn", conn->getDebugID())
+			.detail("ListenAddress", self->getListenAddress())
+			.detail("PeerAddress", conn->getPeerAddress());
 		self->nextConnection.send( conn );
 	}
 	ACTOR static Future<Reference<IConnection>> popOne( FutureStream< Reference<IConnection> > conns ) {
@@ -707,6 +738,8 @@ private:
 		((Sim2Conn*)c.getPtr())->opened = true;
 		return c;
 	}
+
+	NetworkAddress address;
 };
 
 #define g_sim2 ((Sim2&)g_simulator)
@@ -717,17 +750,17 @@ public:
 	// Everything actually network related is delegated to the Sim2Net class; Sim2 is only concerned with simulating machines and time
 	virtual double now() { return time; }
 
-	virtual Future<class Void> delay( double seconds, int taskID ) {
-		ASSERT(taskID >= TaskMinPriority && taskID <= TaskMaxPriority);
+	virtual Future<class Void> delay( double seconds, TaskPriority taskID ) {
+		ASSERT(taskID >= TaskPriority::Min && taskID <= TaskPriority::Max);
 		return delay( seconds, taskID, currentProcess );
 	}
-	Future<class Void> delay( double seconds, int taskID, ProcessInfo* machine ) {
+	Future<class Void> delay( double seconds, TaskPriority taskID, ProcessInfo* machine ) {
 		ASSERT( seconds >= -0.0001 );
 		seconds = std::max(0.0, seconds);
 		Future<Void> f;
 
-		if(!currentProcess->rebooting && machine == currentProcess && !currentProcess->shutdownSignal.isSet() && FLOW_KNOBS->MAX_BUGGIFIED_DELAY > 0 && g_random->random01() < 0.25) { //FIXME: why doesnt this work when we are changing machines?
-			seconds += FLOW_KNOBS->MAX_BUGGIFIED_DELAY*pow(g_random->random01(),1000.0);
+		if(!currentProcess->rebooting && machine == currentProcess && !currentProcess->shutdownSignal.isSet() && FLOW_KNOBS->MAX_BUGGIFIED_DELAY > 0 && deterministicRandom()->random01() < 0.25) { //FIXME: why doesnt this work when we are changing machines?
+			seconds += FLOW_KNOBS->MAX_BUGGIFIED_DELAY*pow(deterministicRandom()->random01(),1000.0);
 		}
 
 		mutex.enter();
@@ -736,13 +769,13 @@ public:
 
 		return f;
 	}
-	ACTOR static Future<Void> checkShutdown(Sim2 *self, int taskID) {
-		ISimulator::KillType kt = wait( self->getCurrentProcess()->shutdownSignal.getFuture() );
+	ACTOR static Future<Void> checkShutdown(Sim2 *self, TaskPriority taskID) {
+		wait(success(self->getCurrentProcess()->shutdownSignal.getFuture()));
 		self->setCurrentTask(taskID);
 		return Void();
 	}
-	virtual Future<class Void> yield( int taskID ) {
-		if (taskID == TaskDefaultYield) taskID = currentTaskID;
+	virtual Future<class Void> yield( TaskPriority taskID ) {
+		if (taskID == TaskPriority::DefaultYield) taskID = currentTaskID;
 		if (check_yield(taskID)) {
 			// We want to check that yielders can handle actual time elapsing (it sometimes will outside simulation), but
 			// don't want to prevent instantaneous shutdown of "rebooted" machines.
@@ -751,18 +784,18 @@ public:
 		setCurrentTask(taskID);
 		return Void();
 	}
-	virtual bool check_yield( int taskID ) {
+	virtual bool check_yield( TaskPriority taskID ) {
 		if (yielded) return true;
 		if (--yield_limit <= 0) {
-			yield_limit = g_random->randomInt(1, 150);  // If yield returns false *too* many times in a row, there could be a stack overflow, since we can't deterministically check stack size as the real network does
+			yield_limit = deterministicRandom()->randomInt(1, 150);  // If yield returns false *too* many times in a row, there could be a stack overflow, since we can't deterministically check stack size as the real network does
 			return yielded = true;
 		}
 		return yielded = BUGGIFY_WITH_PROB(0.01);
 	}
-	virtual int getCurrentTask() {
+	virtual TaskPriority getCurrentTask() {
 		return currentTaskID;
 	}
-	virtual void setCurrentTask(int taskID ) {
+	virtual void setCurrentTask(TaskPriority taskID ) {
 		currentTaskID = taskID;
 	}
 	// Sets the taskID/priority of the current task, without yielding
@@ -775,17 +808,27 @@ public:
 		Reference<Sim2Conn> myc( new Sim2Conn( getCurrentProcess() ) );
 		Reference<Sim2Conn> peerc( new Sim2Conn( peerp ) );
 
-		myc->connect(peerc, toAddr); peerc->connect(myc, NetworkAddress( getCurrentProcess()->address.ip + g_random->randomInt(0,256), g_random->randomInt(40000, 60000) ));
+		myc->connect(peerc, toAddr);
+		IPAddress localIp;
+		if (getCurrentProcess()->address.ip.isV6()) {
+			IPAddress::IPAddressStore store = getCurrentProcess()->address.ip.toV6();
+			uint16_t* ipParts = (uint16_t*)store.data();
+			ipParts[7] += deterministicRandom()->randomInt(0, 256);
+			localIp = IPAddress(store);
+		} else {
+			localIp = IPAddress(getCurrentProcess()->address.ip.toV4() + deterministicRandom()->randomInt(0, 256));
+		}
+		peerc->connect(myc, NetworkAddress(localIp, deterministicRandom()->randomInt(40000, 60000)));
 
-		((Sim2Listener*)peerp->listener.getPtr())->incomingConnection( 0.5*g_random->random01(), Reference<IConnection>(peerc) );
-		return onConnect( ::delay(0.5*g_random->random01()), myc );
+		((Sim2Listener*)peerp->getListener(toAddr).getPtr())->incomingConnection( 0.5*deterministicRandom()->random01(), Reference<IConnection>(peerc) );
+		return onConnect( ::delay(0.5*deterministicRandom()->random01()), myc );
 	}
 	virtual Future<std::vector<NetworkAddress>> resolveTCPEndpoint( std::string host, std::string service) {
 		throw lookup_failed();
 	}
 	ACTOR static Future<Reference<IConnection>> onConnect( Future<Void> ready, Reference<Sim2Conn> conn ) {
 		wait(ready);
-		if (conn->isPeerGone() && g_random->random01()<0.5) {
+		if (conn->isPeerGone() && deterministicRandom()->random01()<0.5) {
 			conn.clear();
 			wait(Never());
 		}
@@ -794,14 +837,15 @@ public:
 	}
 	virtual Reference<IListener> listen( NetworkAddress localAddr ) {
 		ASSERT( !localAddr.isTLS() );
-		ASSERT( localAddr == getCurrentProcess()->address );
-		return Reference<IListener>( getCurrentProcess()->listener );
+		Reference<IListener> listener( getCurrentProcess()->getListener(localAddr) );
+		ASSERT(listener);
+		return listener;
 	}
 	ACTOR static Future<Reference<IConnection>> waitForProcessAndConnect(
 			NetworkAddress toAddr, INetworkConnections *self ) {
 		// We have to be able to connect to processes that don't yet exist, so we do some silly polling
 		loop {
-			wait( ::delay( 0.1 * g_random->random01() ) );
+			wait( ::delay( 0.1 * deterministicRandom()->random01() ) );
 			if (g_sim2.addressMap.count(toAddr)) {
 				Reference<IConnection> c = wait( self->connect( toAddr ) );
 				return c;
@@ -854,17 +898,15 @@ public:
 			numFiles++;
 		}
 
-		bool ok = false;
-
 		if(diskSpace.totalSpace == 0) {
-			diskSpace.totalSpace = 5e9 + g_random->random01() * 100e9; //Total space between 5GB and 105GB
-			diskSpace.baseFreeSpace = std::min<int64_t>(diskSpace.totalSpace, std::max(5e9, (g_random->random01() * (1 - .075) + .075) * diskSpace.totalSpace) + totalFileSize); //Minimum 5GB or 7.5% total disk space, whichever is higher
+			diskSpace.totalSpace = 5e9 + deterministicRandom()->random01() * 100e9; //Total space between 5GB and 105GB
+			diskSpace.baseFreeSpace = std::min<int64_t>(diskSpace.totalSpace, std::max(5e9, (deterministicRandom()->random01() * (1 - .075) + .075) * diskSpace.totalSpace) + totalFileSize); //Minimum 5GB or 7.5% total disk space, whichever is higher
 
 			TraceEvent("Sim2DiskSpaceInitialization").detail("TotalSpace", diskSpace.totalSpace).detail("BaseFreeSpace", diskSpace.baseFreeSpace).detail("TotalFileSize", totalFileSize).detail("NumFiles", numFiles);
 		}
 		else {
 			int64_t maxDelta = std::min(5.0, (now() - diskSpace.lastUpdate)) * (BUGGIFY ? 10e6 : 1e6); //External processes modifying the disk
-			int64_t delta = -maxDelta + g_random->random01() * maxDelta * 2;
+			int64_t delta = -maxDelta + deterministicRandom()->random01() * maxDelta * 2;
 			diskSpace.baseFreeSpace = std::min<int64_t>(diskSpace.totalSpace, std::max<int64_t>(diskSpace.baseFreeSpace + delta, totalFileSize));
 		}
 
@@ -888,16 +930,16 @@ public:
 			g_simulator.getCurrentProcess()->machine->openFiles.erase(filename);
 			g_simulator.getCurrentProcess()->machine->deletingFiles.insert(filename);
 		}
-		if ( mustBeDurable || g_random->random01() < 0.5 ) {
+		if ( mustBeDurable || deterministicRandom()->random01() < 0.5 ) {
 			state ISimulator::ProcessInfo* currentProcess = g_simulator.getCurrentProcess();
-			state int currentTaskID = g_network->getCurrentTask();
+			state TaskPriority currentTaskID = g_network->getCurrentTask();
 			wait( g_simulator.onMachine( currentProcess ) );
 			try {
-				wait( ::delay(0.05 * g_random->random01()) );
+				wait( ::delay(0.05 * deterministicRandom()->random01()) );
 				if (!currentProcess->rebooting) {
 					auto f = IAsyncFileSystem::filesystem(self->net2)->deleteFile(filename, false);
 					ASSERT( f.isReady() );
-					wait( ::delay(0.05 * g_random->random01()) );
+					wait( ::delay(0.05 * deterministicRandom()->random01()) );
 					TEST( true );  // Simulated durable delete
 				}
 				wait( g_simulator.onProcess( currentProcess, currentTaskID ) );
@@ -916,7 +958,7 @@ public:
 	ACTOR static Future<Void> runLoop(Sim2 *self) {
 		state ISimulator::ProcessInfo *callingMachine = self->currentProcess;
 		while ( !self->isStopped ) {
-			wait( self->net2->yield(TaskDefaultYield) );
+			wait( self->net2->yield(TaskPriority::DefaultYield) );
 
 			self->mutex.enter();
 			if( self->tasks.size() == 0 ) {
@@ -938,28 +980,26 @@ public:
 		return Void();
 	}
 
-	ACTOR Future<Void> _run(Sim2 *self) {
-		Future<Void> loopFuture = self->runLoop(self);
-		self->net2->run();
-		wait( loopFuture );
-		return Void();
-	}
-
 	// Implement ISimulator interface
 	virtual void run() {
-		_run(this);
+		Future<Void> loopFuture = runLoop(this);
+		net2->run();
 	}
-	virtual ProcessInfo* newProcess(const char* name, uint32_t ip, uint16_t port,
-		LocalityData locality, ProcessClass startingClass, const char* dataFolder, const char* coordinationFolder) {
-		ASSERT( locality.zoneId().present() );
-		MachineInfo& machine = machines[ locality.zoneId().get() ];
-		if (!machine.zoneId.present())
-			machine.zoneId = locality.zoneId();
+	virtual ProcessInfo* newProcess(const char* name, IPAddress ip, uint16_t port, uint16_t listenPerProcess,
+	                                LocalityData locality, ProcessClass startingClass, const char* dataFolder,
+	                                const char* coordinationFolder) {
+		ASSERT( locality.machineId().present() );
+		MachineInfo& machine = machines[ locality.machineId().get() ];
+		if (!machine.machineId.present())
+			machine.machineId = locality.machineId();
 		for( int i = 0; i < machine.processes.size(); i++ ) {
-			if( machine.processes[i]->locality.zoneId() != locality.zoneId() ) { // SOMEDAY: compute ip from locality to avoid this check
-				TraceEvent("Sim2Mismatch").detail("IP", format("%x", ip))
-						.detailext("ZoneId", locality.zoneId()).detail("NewName", name)
-						.detailext("ExistingMachineId", machine.processes[i]->locality.zoneId()).detail("ExistingName", machine.processes[i]->name);
+			if( machine.processes[i]->locality.machineId() != locality.machineId() ) { // SOMEDAY: compute ip from locality to avoid this check
+				TraceEvent("Sim2Mismatch")
+				    .detail("IP", format("%s", ip.toString().c_str()))
+				    .detail("MachineId", locality.machineId())
+				    .detail("NewName", name)
+				    .detail("ExistingMachineId", machine.processes[i]->locality.machineId())
+				    .detail("ExistingName", machine.processes[i]->name);
 				ASSERT( false );
 			}
 			ASSERT( machine.processes[i]->address.port != port );
@@ -969,25 +1009,33 @@ public:
 		// These files must live on after process kills for sim purposes.
 		if( machine.machineProcess == 0 ) {
 			NetworkAddress machineAddress(ip, 0, false, false);
-			machine.machineProcess = new ProcessInfo("Machine", locality, startingClass, machineAddress, this, "", "");
+			machine.machineProcess = new ProcessInfo("Machine", locality, startingClass, {machineAddress}, this, "", "");
 			machine.machineProcess->machine = &machine;
 		}
 
-		NetworkAddress address(ip, port, true, false); // SOMEDAY see above about becoming SSL!
-		ProcessInfo* m = new ProcessInfo(name, locality, startingClass, address, this, dataFolder, coordinationFolder);
-		m->listener = Reference<IListener>( new Sim2Listener(m) );
+		NetworkAddressList addresses;
+		addresses.address = NetworkAddress(ip, port, true, false);
+		if(listenPerProcess == 2) {
+			addresses.secondaryAddress = NetworkAddress(ip, port+1, true, false);
+		}
+
+		ProcessInfo* m = new ProcessInfo(name, locality, startingClass, addresses, this, dataFolder, coordinationFolder);
+		for (int processPort = port; processPort < port + listenPerProcess; ++processPort) {
+			NetworkAddress address(ip, processPort, true, false); // SOMEDAY see above about becoming SSL!
+			m->listenerMap[address] = Reference<IListener>( new Sim2Listener(m, address) );
+			addressMap[address] = m;
+		}
 		m->machine = &machine;
 		machine.processes.push_back(m);
-		currentlyRebootingProcesses.erase(address);
-		addressMap[ m->address ] = m;
-		m->excluded = g_simulator.isExcluded(address);
-		m->cleared = g_simulator.isCleared(address);
+		currentlyRebootingProcesses.erase(addresses.address);
+		m->excluded = g_simulator.isExcluded(addresses.address);
+		m->cleared = g_simulator.isCleared(addresses.address);
 
 		m->setGlobal(enTDMetrics, (flowGlobalType) &m->tdmetrics);
 		m->setGlobal(enNetworkConnections, (flowGlobalType) m->network);
 		m->setGlobal(enASIOTimedOut, (flowGlobalType) false);
 
-		TraceEvent("NewMachine").detail("Name", name).detail("Address", m->address).detailext("ZoneId", m->locality.zoneId()).detail("Excluded", m->excluded).detail("Cleared", m->cleared);
+		TraceEvent("NewMachine").detail("Name", name).detail("Address", m->address).detail("MachineId", m->locality.machineId()).detail("Excluded", m->excluded).detail("Cleared", m->cleared);
 
 		// FIXME: Sometimes, connections to/from this process will explicitly close
 
@@ -1064,7 +1112,7 @@ public:
 				for (auto processInfo : availableProcesses) {
 					primaryProcessesLeft.add(processInfo->locality);
 					primaryLocalitiesLeft.push_back(processInfo->locality);
-					uniqueMachines.insert(processInfo->locality.machineId());
+					uniqueMachines.insert(processInfo->locality.zoneId());
 				}
 				for (auto processInfo : deadProcesses) {
 					primaryProcessesDead.add(processInfo->locality);
@@ -1072,7 +1120,7 @@ public:
 				}
 			} else {
 				for (auto processInfo : availableProcesses) {
-					uniqueMachines.insert(processInfo->locality.machineId());
+					uniqueMachines.insert(processInfo->locality.zoneId());
 					if(processInfo->locality.dcId() == primaryDcId) {
 						primaryProcessesLeft.add(processInfo->locality);
 						primaryLocalitiesLeft.push_back(processInfo->locality);
@@ -1172,9 +1220,9 @@ public:
 	}
 
 	virtual void destroyProcess( ISimulator::ProcessInfo *p ) {
-		TraceEvent("ProcessDestroyed").detail("Name", p->name).detail("Address", p->address).detailext("ZoneId", p->locality.zoneId());
+		TraceEvent("ProcessDestroyed").detail("Name", p->name).detail("Address", p->address).detail("MachineId", p->locality.machineId());
 		currentlyRebootingProcesses.insert(std::pair<NetworkAddress, ProcessInfo*>(p->address, p));
-		std::vector<ProcessInfo*>& processes = machines[ p->locality.zoneId().get() ].processes;
+		std::vector<ProcessInfo*>& processes = machines[ p->locality.machineId().get() ].processes;
 		if( p != processes.back() ) {
 			auto it = std::find( processes.begin(), processes.end(), p );
 			std::swap( *it, processes.back() );
@@ -1188,16 +1236,16 @@ public:
 		TEST( kt == InjectFaults ); // Simulated machine was killed with faults
 
 		if (kt == KillInstantly) {
-			TraceEvent(SevWarn, "FailMachine").detail("Name", machine->name).detail("Address", machine->address).detailext("ZoneId", machine->locality.zoneId()).detail("Process", machine->toString()).detail("Rebooting", machine->rebooting).detail("Protected", protectedAddresses.count(machine->address)).backtrace();
+			TraceEvent(SevWarn, "FailMachine").detail("Name", machine->name).detail("Address", machine->address).detail("ZoneId", machine->locality.zoneId()).detail("Process", machine->toString()).detail("Rebooting", machine->rebooting).detail("Protected", protectedAddresses.count(machine->address)).backtrace();
 			// This will remove all the "tracked" messages that came from the machine being killed
 			latestEventCache.clear();
 			machine->failed = true;
 		} else if (kt == InjectFaults) {
-			TraceEvent(SevWarn, "FaultMachine").detail("Name", machine->name).detail("Address", machine->address).detailext("ZoneId", machine->locality.zoneId()).detail("Process", machine->toString()).detail("Rebooting", machine->rebooting).detail("Protected", protectedAddresses.count(machine->address)).backtrace();
+			TraceEvent(SevWarn, "FaultMachine").detail("Name", machine->name).detail("Address", machine->address).detail("ZoneId", machine->locality.zoneId()).detail("Process", machine->toString()).detail("Rebooting", machine->rebooting).detail("Protected", protectedAddresses.count(machine->address)).backtrace();
 			should_inject_fault = simulator_should_inject_fault;
-			machine->fault_injection_r = g_random->randomUniqueID().first();
+			machine->fault_injection_r = deterministicRandom()->randomUniqueID().first();
 			machine->fault_injection_p1 = 0.1;
-			machine->fault_injection_p2 = g_random->random01();
+			machine->fault_injection_p2 = deterministicRandom()->random01();
 		} else {
 			ASSERT( false );
 		}
@@ -1224,7 +1272,7 @@ public:
 				}
 			}
 			if( processes.size() )
-				doReboot( g_random->randomChoice( processes ), RebootProcess );
+				doReboot( deterministicRandom()->randomChoice( processes ), RebootProcess );
 		}
 	}
 	virtual void killProcess( ProcessInfo* machine, KillType kt ) {
@@ -1235,12 +1283,28 @@ public:
 	}
 	virtual void killInterface( NetworkAddress address, KillType kt  ) {
 		if (kt < RebootAndDelete ) {
-			std::vector<ProcessInfo*>& processes = machines[ addressMap[address]->locality.zoneId() ].processes;
+			std::vector<ProcessInfo*>& processes = machines[ addressMap[address]->locality.machineId() ].processes;
 			for( int i = 0; i < processes.size(); i++ )
 				killProcess_internal( processes[i], kt );
 		}
 	}
-	virtual bool killMachine(Optional<Standalone<StringRef>> zoneId, KillType kt, bool forceKill, KillType* ktFinal) {
+	virtual bool killZone(Optional<Standalone<StringRef>> zoneId, KillType kt, bool forceKill, KillType* ktFinal) {
+		auto processes = getAllProcesses();
+		std::set<Optional<Standalone<StringRef>>> zoneMachines;
+		for (auto& process : processes) {
+			if(process->locality.zoneId() == zoneId) {
+				zoneMachines.insert(process->locality.machineId());
+			}
+		}
+		bool result = false;
+		for(auto& machineId : zoneMachines) {
+			if(killMachine(machineId, kt, forceKill, ktFinal)) {
+				result = true;
+			}
+		}
+		return result;
+	}
+	virtual bool killMachine(Optional<Standalone<StringRef>> machineId, KillType kt, bool forceKill, KillType* ktFinal) {
 		auto ktOrig = kt;
 
 		TEST(true); // Trying to killing a machine
@@ -1248,7 +1312,7 @@ public:
 		TEST(kt == InjectFaults);  // Trying to kill by injecting faults
 
 		if(speedUpSimulation && !forceKill) {
-			TraceEvent(SevWarn, "AbortedKill").detailext("ZoneId", zoneId).detail("Reason", "Unforced kill within speedy simulation.").backtrace();
+			TraceEvent(SevWarn, "AbortedKill").detail("MachineId", machineId).detail("Reason", "Unforced kill within speedy simulation.").backtrace();
 			if (ktFinal) *ktFinal = None;
 			return false;
 		}
@@ -1257,7 +1321,7 @@ public:
 
 		KillType originalKt = kt;
 		// Reboot if any of the processes are protected and count the number of processes not rebooting
-		for (auto& process : machines[zoneId].processes) {
+		for (auto& process : machines[machineId].processes) {
 			if (protectedAddresses.count(process->address))
 				kt = Reboot;
 			if (!process->rebooting)
@@ -1266,7 +1330,7 @@ public:
 
 		// Do nothing, if no processes to kill
 		if (processesOnMachine == 0) {
-			TraceEvent(SevWarn, "AbortedKill").detailext("ZoneId", zoneId).detail("Reason", "The target had no processes running.").detail("Processes", processesOnMachine).detail("ProcessesPerMachine", processesPerMachine).backtrace();
+			TraceEvent(SevWarn, "AbortedKill").detail("MachineId", machineId).detail("Reason", "The target had no processes running.").detail("Processes", processesOnMachine).detail("ProcessesPerMachine", processesPerMachine).backtrace();
 			if (ktFinal) *ktFinal = None;
 			return false;
 		}
@@ -1295,7 +1359,7 @@ public:
 						processesLeft.push_back(processInfo);
 						protectedWorker++;
 					}
-					else if (processInfo->locality.zoneId() != zoneId) {
+					else if (processInfo->locality.machineId() != machineId) {
 						processesLeft.push_back(processInfo);
 					} else {
 						processesDead.push_back(processInfo);
@@ -1303,24 +1367,24 @@ public:
 				}
 			}
 			if (!canKillProcesses(processesLeft, processesDead, kt, &kt)) {
-				TraceEvent("ChangedKillMachine").detailext("ZoneId", zoneId).detail("KillType", kt).detail("OrigKillType", ktOrig).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("TotalProcesses", machines.size()).detail("ProcessesPerMachine", processesPerMachine).detail("Protected", protectedWorker).detail("Unavailable", unavailable).detail("Excluded", excluded).detail("Cleared", cleared).detail("ProtectedTotal", protectedAddresses.size()).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
+				TraceEvent("ChangedKillMachine").detail("MachineId", machineId).detail("KillType", kt).detail("OrigKillType", ktOrig).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("TotalProcesses", machines.size()).detail("ProcessesPerMachine", processesPerMachine).detail("Protected", protectedWorker).detail("Unavailable", unavailable).detail("Excluded", excluded).detail("Cleared", cleared).detail("ProtectedTotal", protectedAddresses.size()).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
 			}
 			else if ((kt == KillInstantly) || (kt == InjectFaults)) {
-				TraceEvent("DeadMachine").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("TotalProcesses", machines.size()).detail("ProcessesPerMachine", processesPerMachine).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
+				TraceEvent("DeadMachine").detail("MachineId", machineId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("TotalProcesses", machines.size()).detail("ProcessesPerMachine", processesPerMachine).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
 				for (auto process : processesLeft) {
-					TraceEvent("DeadMachineSurvivors").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("SurvivingProcess", process->toString());
+					TraceEvent("DeadMachineSurvivors").detail("MachineId", machineId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("SurvivingProcess", process->toString());
 				}
 				for (auto process : processesDead) {
-					TraceEvent("DeadMachineVictims").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("VictimProcess", process->toString());
+					TraceEvent("DeadMachineVictims").detail("MachineId", machineId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("VictimProcess", process->toString());
 				}
 			}
 			else {
-				TraceEvent("ClearMachine").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("TotalProcesses", machines.size()).detail("ProcessesPerMachine", processesPerMachine).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
+				TraceEvent("ClearMachine").detail("MachineId", machineId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("TotalProcesses", machines.size()).detail("ProcessesPerMachine", processesPerMachine).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
 				for (auto process : processesLeft) {
-					TraceEvent("ClearMachineSurvivors").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("SurvivingProcess", process->toString());
+					TraceEvent("ClearMachineSurvivors").detail("MachineId", machineId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("SurvivingProcess", process->toString());
 				}
 				for (auto process : processesDead) {
-					TraceEvent("ClearMachineVictims").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("VictimProcess", process->toString());
+					TraceEvent("ClearMachineVictims").detail("MachineId", machineId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("VictimProcess", process->toString());
 				}
 			}
 		}
@@ -1330,7 +1394,7 @@ public:
 		// Check if any processes on machine are rebooting
 		if( processesOnMachine != processesPerMachine && kt >= RebootAndDelete ) {
 			TEST(true); //Attempted reboot, but the target did not have all of its processes running
-			TraceEvent(SevWarn, "AbortedKill").detail("KillType", kt).detailext("ZoneId", zoneId).detail("Reason", "Machine processes does not match number of processes per machine").detail("Processes", processesOnMachine).detail("ProcessesPerMachine", processesPerMachine).backtrace();
+			TraceEvent(SevWarn, "AbortedKill").detail("KillType", kt).detail("MachineId", machineId).detail("Reason", "Machine processes does not match number of processes per machine").detail("Processes", processesOnMachine).detail("ProcessesPerMachine", processesPerMachine).backtrace();
 			if (ktFinal) *ktFinal = None;
 			return false;
 		}
@@ -1338,23 +1402,23 @@ public:
 		// Check if any processes on machine are rebooting
 		if ( processesOnMachine != processesPerMachine ) {
 			TEST(true); //Attempted reboot, but the target did not have all of its processes running
-			TraceEvent(SevWarn, "AbortedKill").detail("KillType", kt).detailext("ZoneId", zoneId).detail("Reason", "Machine processes does not match number of processes per machine").detail("Processes", processesOnMachine).detail("ProcessesPerMachine", processesPerMachine).backtrace();
+			TraceEvent(SevWarn, "AbortedKill").detail("KillType", kt).detail("MachineId", machineId).detail("Reason", "Machine processes does not match number of processes per machine").detail("Processes", processesOnMachine).detail("ProcessesPerMachine", processesPerMachine).backtrace();
 			if (ktFinal) *ktFinal = None;
 			return false;
 		}
 
-		TraceEvent("KillMachine").detailext("ZoneId", zoneId).detail("Kt", kt).detail("KtOrig", ktOrig).detail("KillableMachines", processesOnMachine).detail("ProcessPerMachine", processesPerMachine).detail("KillChanged", kt!=ktOrig);
+		TraceEvent("KillMachine").detail("MachineId", machineId).detail("Kt", kt).detail("KtOrig", ktOrig).detail("KillableMachines", processesOnMachine).detail("ProcessPerMachine", processesPerMachine).detail("KillChanged", kt!=ktOrig);
 		if ( kt < RebootAndDelete ) {
-			if(kt == InjectFaults && machines[zoneId].machineProcess != nullptr)
-				killProcess_internal( machines[zoneId].machineProcess, kt );
-			for (auto& process : machines[zoneId].processes) {
+			if(kt == InjectFaults && machines[machineId].machineProcess != nullptr)
+				killProcess_internal( machines[machineId].machineProcess, kt );
+			for (auto& process : machines[machineId].processes) {
 				TraceEvent("KillMachineProcess").detail("KillType", kt).detail("Process", process->toString()).detail("StartingClass", process->startingClass.toString()).detail("Failed", process->failed).detail("Excluded", process->excluded).detail("Cleared", process->cleared).detail("Rebooting", process->rebooting);
 				if (process->startingClass != ProcessClass::TesterClass)
 					killProcess_internal( process, kt );
 			}
 		}
 		else if ( kt == Reboot || kt == RebootAndDelete ) {
-			for (auto& process : machines[zoneId].processes) {
+			for (auto& process : machines[machineId].processes) {
 				TraceEvent("KillMachineProcess").detail("KillType", kt).detail("Process", process->toString()).detail("StartingClass", process->startingClass.toString()).detail("Failed", process->failed).detail("Excluded", process->excluded).detail("Cleared", process->cleared).detail("Rebooting", process->rebooting);
 				if (process->startingClass != ProcessClass::TesterClass)
 					doReboot(process, kt );
@@ -1373,21 +1437,21 @@ public:
 	virtual bool killDataCenter(Optional<Standalone<StringRef>> dcId, KillType kt, bool forceKill, KillType* ktFinal) {
 		auto ktOrig = kt;
 		auto processes = getAllProcesses();
-		std::map<Optional<Standalone<StringRef>>, int>	datacenterZones;
+		std::map<Optional<Standalone<StringRef>>, int> datacenterMachines;
 		int	dcProcesses = 0;
 
 		// Switch to a reboot, if anything protected on machine
 		for (auto& procRecord : processes) {
 			auto processDcId = procRecord->locality.dcId();
-			auto processZoneId = procRecord->locality.zoneId();
-			ASSERT(processZoneId.present());
+			auto processMachineId = procRecord->locality.machineId();
+			ASSERT(processMachineId.present());
 			if (processDcId.present() && (processDcId == dcId)) {
 				if ((kt != Reboot) && (protectedAddresses.count(procRecord->address))) {
 					kt = Reboot;
-					TraceEvent(SevWarn, "DcKillChanged").detailext("DataCenter", dcId).detail("KillType", kt).detail("OrigKillType", ktOrig)
+					TraceEvent(SevWarn, "DcKillChanged").detail("DataCenter", dcId).detail("KillType", kt).detail("OrigKillType", ktOrig)
 						.detail("Reason", "Datacenter has protected process").detail("ProcessAddress", procRecord->address).detail("Failed", procRecord->failed).detail("Rebooting", procRecord->rebooting).detail("Excluded", procRecord->excluded).detail("Cleared", procRecord->cleared).detail("Process", procRecord->toString());
 				}
-				datacenterZones[processZoneId.get()] ++;
+				datacenterMachines[processMachineId.get()] ++;
 				dcProcesses ++;
 			}
 		}
@@ -1400,7 +1464,7 @@ public:
 				if (processInfo->isAvailableClass()) {
 					if (processInfo->isExcluded() || processInfo->isCleared() || !processInfo->isAvailable()) {
 						processesDead.push_back(processInfo);
-					} else if (protectedAddresses.count(processInfo->address) || datacenterZones.find(processInfo->locality.zoneId()) == datacenterZones.end()) {
+					} else if (protectedAddresses.count(processInfo->address) || datacenterMachines.find(processInfo->locality.machineId()) == datacenterMachines.end()) {
 						processesLeft.push_back(processInfo);
 					} else {
 						processesDead.push_back(processInfo);
@@ -1409,39 +1473,39 @@ public:
 			}
 
 			if (!canKillProcesses(processesLeft, processesDead, kt, &kt)) {
-				TraceEvent(SevWarn, "DcKillChanged").detailext("DataCenter", dcId).detail("KillType", kt).detail("OrigKillType", ktOrig);
+				TraceEvent(SevWarn, "DcKillChanged").detail("DataCenter", dcId).detail("KillType", kt).detail("OrigKillType", ktOrig);
 			}
 			else {
-				TraceEvent("DeadDataCenter").detailext("DataCenter", dcId).detail("KillType", kt).detail("DcZones", datacenterZones.size()).detail("DcProcesses", dcProcesses).detail("ProcessesDead", processesDead.size()).detail("ProcessesLeft", processesLeft.size()).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
+				TraceEvent("DeadDataCenter").detail("DataCenter", dcId).detail("KillType", kt).detail("DcZones", datacenterMachines.size()).detail("DcProcesses", dcProcesses).detail("ProcessesDead", processesDead.size()).detail("ProcessesLeft", processesLeft.size()).detail("TLogPolicy", tLogPolicy->info()).detail("StoragePolicy", storagePolicy->info());
 				for (auto process : processesLeft) {
-					auto zoneId = process->locality.zoneId();
-					TraceEvent("DeadDcSurvivors").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("SurvivingProcess", process->toString());
+					TraceEvent("DeadDcSurvivors").detail("MachineId", process->locality.machineId()).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("SurvivingProcess", process->toString());
 				}
 				for (auto process : processesDead) {
-					auto zoneId = process->locality.zoneId();
-					TraceEvent("DeadDcVictims").detailext("ZoneId", zoneId).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("VictimProcess", process->toString());
+					TraceEvent("DeadDcVictims").detail("MachineId", process->locality.machineId()).detail("KillType", kt).detail("ProcessesLeft", processesLeft.size()).detail("ProcessesDead", processesDead.size()).detail("VictimProcess", process->toString());
 				}
 			}
 		}
 
 		KillType	ktResult, ktMin = kt;
-		for (auto& datacenterZone : datacenterZones) {
-			killMachine(datacenterZone.first, kt, true, &ktResult);
-			if (ktResult != kt) {
-				TraceEvent(SevWarn, "KillDCFail")
-					.detailext("Zone", datacenterZone.first)
-					.detail("KillType", kt)
-					.detail("KillTypeResult", ktResult)
-					.detail("KillTypeOrig", ktOrig);
-				ASSERT(ktResult == None);
+		for (auto& datacenterMachine : datacenterMachines) {
+			if(deterministicRandom()->random01() < 0.99) {
+				killMachine(datacenterMachine.first, kt, true, &ktResult);
+				if (ktResult != kt) {
+					TraceEvent(SevWarn, "KillDCFail")
+						.detail("Zone", datacenterMachine.first)
+						.detail("KillType", kt)
+						.detail("KillTypeResult", ktResult)
+						.detail("KillTypeOrig", ktOrig);
+					ASSERT(ktResult == None);
+				}
+				ktMin = std::min<KillType>( ktResult, ktMin );
 			}
-			ktMin = std::min<KillType>( ktResult, ktMin );
 		}
 
 		TraceEvent("KillDataCenter")
-			.detail("DcZones", datacenterZones.size())
+			.detail("DcZones", datacenterMachines.size())
 			.detail("DcProcesses", dcProcesses)
-			.detailext("DCID", dcId)
+			.detail("DCID", dcId)
 			.detail("KillType", kt)
 			.detail("KillTypeOrig", ktOrig)
 			.detail("KillTypeMin", ktMin)
@@ -1459,22 +1523,24 @@ public:
 
 		return (kt == ktMin);
 	}
-	virtual void clogInterface( uint32_t ip, double seconds, ClogMode mode = ClogDefault ) {
+	virtual void clogInterface(const IPAddress& ip, double seconds, ClogMode mode = ClogDefault) {
 		if (mode == ClogDefault) {
-			double a = g_random->random01();
+			double a = deterministicRandom()->random01();
 			if ( a < 0.3 ) mode = ClogSend;
 			else if (a < 0.6 ) mode = ClogReceive;
 			else mode = ClogAll;
 		}
-		TraceEvent("ClogInterface").detail("IP", toIPString(ip)).detail("Delay", seconds)
-			.detail("Queue", mode==ClogSend?"Send":mode==ClogReceive?"Receive":"All");
+		TraceEvent("ClogInterface")
+		    .detail("IP", ip.toString())
+		    .detail("Delay", seconds)
+		    .detail("Queue", mode == ClogSend ? "Send" : mode == ClogReceive ? "Receive" : "All");
 
 		if (mode == ClogSend || mode==ClogAll)
 			g_clogging.clogSendFor( ip, seconds );
 		if (mode == ClogReceive || mode==ClogAll)
 			g_clogging.clogRecvFor( ip, seconds );
 	}
-	virtual void clogPair( uint32_t from, uint32_t to, double seconds ) {
+	virtual void clogPair(const IPAddress& from, const IPAddress& to, double seconds) {
 		g_clogging.clogPairFor( from, to, seconds );
 	}
 	virtual std::vector<ProcessInfo*> getAllProcesses() const {
@@ -1494,45 +1560,45 @@ public:
 	}
 
 	virtual MachineInfo* getMachineByNetworkAddress(NetworkAddress const& address) {
-		return &machines[addressMap[address]->locality.zoneId()];
+		return &machines[addressMap[address]->locality.machineId()];
 	}
 
-	virtual MachineInfo* getMachineById(Optional<Standalone<StringRef>> const& zoneId) {
-		return &machines[zoneId];
+	virtual MachineInfo* getMachineById(Optional<Standalone<StringRef>> const& machineId) {
+		return &machines[machineId];
 	}
 
-	virtual void destroyMachine(Optional<Standalone<StringRef>> const& zoneId ) {
-		auto& machine = machines[zoneId];
+	virtual void destroyMachine(Optional<Standalone<StringRef>> const& machineId ) {
+		auto& machine = machines[machineId];
 		for( auto process : machine.processes ) {
 			ASSERT( process->failed );
 		}
 		if( machine.machineProcess ) {
 			 killProcess_internal( machine.machineProcess, KillInstantly );
 		}
-		machines.erase(zoneId);
+		machines.erase(machineId);
 	}
 
-	Sim2() : time(0.0), taskCount(0), yielded(false), yield_limit(0), currentTaskID(-1) {
+	Sim2() : time(0.0), taskCount(0), yielded(false), yield_limit(0), currentTaskID(TaskPriority::Zero) {
 		// Not letting currentProcess be NULL eliminates some annoying special cases
-		currentProcess = new ProcessInfo( "NoMachine", LocalityData(Optional<Standalone<StringRef>>(), StringRef(), StringRef(), StringRef()), ProcessClass(), NetworkAddress(), this, "", "" );
-		g_network = net2 = newNet2(NetworkAddress(), false, true);
+		currentProcess = new ProcessInfo("NoMachine", LocalityData(Optional<Standalone<StringRef>>(), StringRef(), StringRef(), StringRef()), ProcessClass(), {NetworkAddress()}, this, "", "");
+		g_network = net2 = newNet2(false, true);
 		Net2FileSystem::newFileSystem();
-		check_yield(0);
+		check_yield(TaskPriority::Zero);
 	}
 
 	// Implementation
 	struct Task {
-		int taskID;
+		TaskPriority taskID;
 		double time;
 		uint64_t stable;
 		ProcessInfo* machine;
 		Promise<Void> action;
-		Task( double time, int taskID, uint64_t stable, ProcessInfo* machine, Promise<Void>&& action ) : time(time), taskID(taskID), stable(stable), machine(machine), action(std::move(action)) {}
-		Task( double time, int taskID, uint64_t stable, ProcessInfo* machine, Future<Void>& future ) : time(time), taskID(taskID), stable(stable), machine(machine) { future = action.getFuture(); }
-		Task(Task&& rhs) noexcept(true) : time(rhs.time), taskID(rhs.taskID), stable(rhs.stable), machine(rhs.machine), action(std::move(rhs.action)) {}
+		Task( double time, TaskPriority taskID, uint64_t stable, ProcessInfo* machine, Promise<Void>&& action ) : time(time), taskID(taskID), stable(stable), machine(machine), action(std::move(action)) {}
+		Task( double time, TaskPriority taskID, uint64_t stable, ProcessInfo* machine, Future<Void>& future ) : time(time), taskID(taskID), stable(stable), machine(machine) { future = action.getFuture(); }
+		Task(Task&& rhs) BOOST_NOEXCEPT : time(rhs.time), taskID(rhs.taskID), stable(rhs.stable), machine(rhs.machine), action(std::move(rhs.action)) {}
 		void operator= ( Task const& rhs ) { taskID = rhs.taskID; time = rhs.time; stable = rhs.stable; machine = rhs.machine; action = rhs.action; }
 		Task( Task const& rhs ) : taskID(rhs.taskID), time(rhs.time), stable(rhs.stable), machine(rhs.machine), action(rhs.action) {}
-		void operator= (Task&& rhs) noexcept(true) { time = rhs.time; taskID = rhs.taskID; stable = rhs.stable; machine = rhs.machine; action = std::move(rhs.action); }
+		void operator= (Task&& rhs) BOOST_NOEXCEPT { time = rhs.time; taskID = rhs.taskID; stable = rhs.stable; machine = rhs.machine; action = std::move(rhs.action); }
 
 		bool operator < (Task const& rhs) const {
 			// Ordering is reversed for priority_queue
@@ -1557,7 +1623,7 @@ public:
 				ASSERT( this->currentProcess == t.machine );
 				/*auto elapsed = getCPUTicks() - before;
 				currentProcess->cpuTicks += elapsed;
-				if (g_random->random01() < 0.01){
+				if (deterministicRandom()->random01() < 0.01){
 					TraceEvent("TaskDuration").detail("CpuTicks", currentProcess->cpuTicks);
 					currentProcess->cpuTicks = 0;
 				}*/
@@ -1571,24 +1637,27 @@ public:
 			//}
 
 			if (randLog)
-				fprintf( randLog, "T %f %d %s %lld\n", this->time, int(g_random->peek() % 10000), t.machine ? t.machine->name : "none", t.stable);
+				fprintf( randLog, "T %f %d %s %" PRId64 "\n", this->time, int(deterministicRandom()->peek() % 10000), t.machine ? t.machine->name : "none", t.stable);
 		}
 	}
 
-	virtual void onMainThread( Promise<Void>&& signal, int taskID ) {
+	virtual void onMainThread( Promise<Void>&& signal, TaskPriority taskID ) {
 		// This is presumably coming from either a "fake" thread pool thread, i.e. it is actually on this thread
 		// or a thread created with g_network->startThread
 		ASSERT(getCurrentProcess());
 
 		mutex.enter();
-		ASSERT(taskID >= TaskMinPriority && taskID <= TaskMaxPriority);
+		ASSERT(taskID >= TaskPriority::Min && taskID <= TaskPriority::Max);
 		tasks.push( Task( time, taskID, taskCount++, getCurrentProcess(), std::move(signal) ) );
 		mutex.leave();
 	}
-	virtual Future<Void> onProcess( ISimulator::ProcessInfo *process, int taskID ) {
+	bool isOnMainThread() const override {
+		return net2->isOnMainThread();
+	}
+	virtual Future<Void> onProcess( ISimulator::ProcessInfo *process, TaskPriority taskID ) {
 		return delay( 0, taskID, process );
 	}
-	virtual Future<Void> onMachine( ISimulator::ProcessInfo *process, int taskID ) {
+	virtual Future<Void> onMachine( ISimulator::ProcessInfo *process, TaskPriority taskID ) {
 		if( process->machine == 0 )
 			return Void();
 		return delay( 0, taskID, process->machine->machineProcess );
@@ -1597,7 +1666,7 @@ public:
 	//time is guarded by ISimulator::mutex. It is not necessary to guard reads on the main thread because
 	//time should only be modified from the main thread.
 	double time;
-	int currentTaskID;
+	TaskPriority currentTaskID;
 
 	//taskCount is guarded by ISimulator::mutex
 	uint64_t taskCount;
@@ -1613,7 +1682,7 @@ public:
 	INetwork *net2;
 
 	//Map from machine IP -> machine disk space info
-	std::map<uint32_t, SimDiskSpace> diskSpaceMap;
+	std::map<IPAddress, SimDiskSpace> diskSpaceMap;
 
 	//Whether or not yield has returned true during the current iteration of the run loop
 	bool yielded;
@@ -1623,24 +1692,13 @@ public:
 void startNewSimulator() {
 	ASSERT( !g_network );
 	g_network = g_pSimulator = new Sim2();
-	g_simulator.connectionFailuresDisableDuration = g_random->random01() < 0.5 ? 0 : 1e6;
-}
-
-static double networkLatency() {
-	double a = g_random->random01();
-	const double pFast = 0.999;
-	if (a <= pFast)
-		return FLOW_KNOBS->MIN_NETWORK_LATENCY + FLOW_KNOBS->FAST_NETWORK_LATENCY/pFast * a; // 0.5ms average
-	else{
-		a = (a-pFast) / (1-pFast); // uniform 0-1 again
-		return FLOW_KNOBS->MIN_NETWORK_LATENCY + FLOW_KNOBS->SLOW_NETWORK_LATENCY*a; // long tail up to X ms
-	}
+	g_simulator.connectionFailuresDisableDuration = deterministicRandom()->random01() < 0.5 ? 0 : 1e6;
 }
 
 ACTOR void doReboot( ISimulator::ProcessInfo *p, ISimulator::KillType kt ) {
-	TraceEvent("RebootingProcessAttempt").detailext("ZoneId", p->locality.zoneId()).detail("KillType", kt).detail("Process", p->toString()).detail("StartingClass", p->startingClass.toString()).detail("Failed", p->failed).detail("Excluded", p->excluded).detail("Cleared", p->cleared).detail("Rebooting", p->rebooting).detail("TaskDefaultDelay", TaskDefaultDelay);
+	TraceEvent("RebootingProcessAttempt").detail("ZoneId", p->locality.zoneId()).detail("KillType", kt).detail("Process", p->toString()).detail("StartingClass", p->startingClass.toString()).detail("Failed", p->failed).detail("Excluded", p->excluded).detail("Cleared", p->cleared).detail("Rebooting", p->rebooting).detail("TaskPriorityDefaultDelay", TaskPriority::DefaultDelay);
 
-	wait( g_sim2.delay( 0, TaskDefaultDelay, p ) ); // Switch to the machine in question
+	wait( g_sim2.delay( 0, TaskPriority::DefaultDelay, p ) ); // Switch to the machine in question
 
 	try {
 		ASSERT( kt == ISimulator::RebootProcess || kt == ISimulator::Reboot || kt == ISimulator::RebootAndDelete || kt == ISimulator::RebootProcessAndDelete );
@@ -1652,7 +1710,7 @@ ACTOR void doReboot( ISimulator::ProcessInfo *p, ISimulator::KillType kt ) {
 
 		if( p->rebooting )
 			return;
-		TraceEvent("RebootingProcess").detail("KillType", kt).detail("Address", p->address).detailext("ZoneId", p->locality.zoneId()).detailext("DataHall", p->locality.dataHallId()).detail("Locality", p->locality.toString()).detail("Failed", p->failed).detail("Excluded", p->excluded).detail("Cleared", p->cleared).backtrace();
+		TraceEvent("RebootingProcess").detail("KillType", kt).detail("Address", p->address).detail("ZoneId", p->locality.zoneId()).detail("DataHall", p->locality.dataHallId()).detail("Locality", p->locality.toString()).detail("Failed", p->failed).detail("Excluded", p->excluded).detail("Cleared", p->cleared).backtrace();
 		p->rebooting = true;
 		if ((kt == ISimulator::RebootAndDelete) || (kt == ISimulator::RebootProcessAndDelete)) {
 			p->cleared = true;
@@ -1676,9 +1734,9 @@ Future<Void> waitUntilDiskReady( Reference<DiskParameters> diskParameters, int64
 
 	double randomLatency;
 	if(sync) {
-		randomLatency = .005 + g_random->random01() * (BUGGIFY ? 1.0 : .010);
+		randomLatency = .005 + deterministicRandom()->random01() * (BUGGIFY ? 1.0 : .010);
 	} else
-		randomLatency = 10 * g_random->random01() / diskParameters->iops;
+		randomLatency = 10 * deterministicRandom()->random01() / diskParameters->iops;
 
 	return delayUntil( diskParameters->nextOperation + randomLatency );
 }
@@ -1751,7 +1809,7 @@ Future< Void > Sim2FileSystem::deleteFile( std::string filename, bool mustBeDura
 Future< std::time_t > Sim2FileSystem::lastWriteTime( std::string filename ) {
 	// TODO: update this map upon file writes.
 	static std::map<std::string, double> fileWrites;
-	if (BUGGIFY && g_random->random01() < 0.01) {
+	if (BUGGIFY && deterministicRandom()->random01() < 0.01) {
 		fileWrites[filename] = now();
 	}
 	return fileWrites[filename];

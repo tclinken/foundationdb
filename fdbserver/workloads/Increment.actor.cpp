@@ -18,9 +18,9 @@
  * limitations under the License.
  */
 
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
@@ -89,8 +89,8 @@ struct Increment : TestWorkload {
 				state Transaction tr(cx);
 				while (true) {
 					try {
-						tr.atomicOp(intToTestKey(g_random->randomInt(0,self->nodeCount/2)), LiteralStringRef("\x01"), MutationRef::AddValue);
-						tr.atomicOp(intToTestKey(g_random->randomInt(self->nodeCount/2,self->nodeCount)), LiteralStringRef("\x01"), MutationRef::AddValue);
+						tr.atomicOp(intToTestKey(deterministicRandom()->randomInt(0,self->nodeCount/2)), LiteralStringRef("\x01"), MutationRef::AddValue);
+						tr.atomicOp(intToTestKey(deterministicRandom()->randomInt(self->nodeCount/2,self->nodeCount)), LiteralStringRef("\x01"), MutationRef::AddValue);
 						wait( tr.commit() );
 						break;
 					} catch (Error& e) {

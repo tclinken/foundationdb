@@ -19,6 +19,7 @@
  */
 
 #include "flow/Stats.h"
+#include "flow/actorcompiler.h" // has to be last include
 
 Counter::Counter(std::string const& name, CounterCollection& collection)
 : name(name), interval_start(0), last_event(0), interval_sq_time(0), interval_start_value(0), interval_delta(0)
@@ -68,6 +69,13 @@ void Counter::clear() {
 	metric = 0;
 }
 
+void CounterCollection::logToTraceEvent(TraceEvent &te) const {
+	for (ICounter* c : counters) {
+		te.detail(c->getName().c_str(), c);
+		c->resetInterval();
+	}
+}
+
 ACTOR Future<Void> traceCounters(std::string traceEventName, UID traceEventID, double interval, CounterCollection* counters, std::string trackLatestName) {
 	wait(delay(0)); // Give an opportunity for all members used in special counters to be initialized
 
@@ -79,15 +87,12 @@ ACTOR Future<Void> traceCounters(std::string traceEventName, UID traceEventID, d
 	loop{
 		TraceEvent te(traceEventName.c_str(), traceEventID);
 		te.detail("Elapsed", now() - last_interval);
-		for (ICounter* c : counters->counters) {
-			if (c->hasRate() && c->hasRoughness())
-				te.detailf(c->getName().c_str(), "%g %g %lld", c->getRate(), c->getRoughness(), (long long)c->getValue());
-			else
-				te.detail(c->getName().c_str(), c->getValue());
-			c->resetInterval();
-		}
-		if (!trackLatestName.empty())
+
+		counters->logToTraceEvent(te);
+
+		if (!trackLatestName.empty()) {
 			te.trackLatest(trackLatestName.c_str());
+		}
 
 		last_interval = now();
 		wait(delay(interval));

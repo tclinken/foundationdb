@@ -19,6 +19,8 @@
  */
 
 #include "fdbclient/BackupContainer.h"
+#include "fdbclient/BackupAgent.actor.h"
+#include "fdbclient/JsonBuilder.h"
 #include "flow/Trace.h"
 #include "flow/UnitTest.h"
 #include "flow/Hash3.h"
@@ -31,7 +33,9 @@
 #include "fdbclient/KeyBackedTypes.h"
 #include "fdbclient/RunTransaction.actor.h"
 #include <algorithm>
+#include <cinttypes>
 #include <time.h>
+#include "flow/actorcompiler.h" // has to be last include
 
 namespace IBackupFile_impl {
 
@@ -57,23 +61,14 @@ std::string IBackupContainer::ExpireProgress::toString() const {
 
 void BackupFileList::toStream(FILE *fout) const {
 	for(const RangeFile &f : ranges) {
-		fprintf(fout, "range %lld %s\n", f.fileSize, f.fileName.c_str());
+		fprintf(fout, "range %" PRId64 " %s\n", f.fileSize, f.fileName.c_str());
 	}
 	for(const LogFile &f : logs) {
-		fprintf(fout, "log %lld %s\n", f.fileSize, f.fileName.c_str());
+		fprintf(fout, "log %" PRId64 " %s\n", f.fileSize, f.fileName.c_str());
 	}
 	for(const KeyspaceSnapshotFile &f : snapshots) {
-		fprintf(fout, "snapshotManifest %lld %s\n", f.totalSize, f.fileName.c_str());
+		fprintf(fout, "snapshotManifest %" PRId64 " %s\n", f.totalSize, f.fileName.c_str());
 	}
-}
-
-std::string formatTime(int64_t t) {
-	time_t curTime = (time_t)t;
-	char buffer[128];
-	struct tm timeinfo;
-	getLocalTime(&curTime, &timeinfo);
-	strftime(buffer, 128, "%Y-%m-%d %H:%M:%S", &timeinfo);
-	return buffer;
 }
 
 Future<Void> fetchTimes(Reference<ReadYourWritesTransaction> tr,  std::map<Version, int64_t> *pVersionTimeMap) {
@@ -126,7 +121,7 @@ std::string BackupDescription::toString() const {
 		if(!versionTimeMap.empty()) {
 			auto i = versionTimeMap.find(v);
 			if(i != versionTimeMap.end())
-				s = format("%lld (%s)", v, formatTime(i->second).c_str());
+				s = format("%lld (%s)", v, BackupAgentBase::formatTime(i->second).c_str());
 			else
 				s = format("%lld (unknown)", v);
 		}
@@ -141,8 +136,8 @@ std::string BackupDescription::toString() const {
 	};
 
 	for(const KeyspaceSnapshotFile &m : snapshots) {
-		info.append(format("Snapshot:  startVersion=%s  endVersion=%s  totalBytes=%lld  restorable=%s\n",
-			formatVersion(m.beginVersion).c_str(), formatVersion(m.endVersion).c_str(), m.totalSize, m.restorable.orDefault(false) ? "true" : "false"));
+		info.append(format("Snapshot:  startVersion=%s  endVersion=%s  totalBytes=%lld  restorable=%s  expiredPct=%.2f\n",
+			formatVersion(m.beginVersion).c_str(), formatVersion(m.endVersion).c_str(), m.totalSize, m.restorable.orDefault(false) ? "true" : "false", m.expiredPct(expiredEndVersion)));
 	}
 
 	info.append(format("SnapshotBytes: %lld\n", snapshotBytes));
@@ -166,6 +161,65 @@ std::string BackupDescription::toString() const {
 		info.append("ExtendedDetail: ").append(extendedDetail);
 
 	return info;
+}
+
+std::string BackupDescription::toJSON() const {
+	JsonBuilderObject doc;
+
+	doc.setKey("SchemaVersion", "1.0.0");
+	doc.setKey("URL", url.c_str());
+	doc.setKey("Restorable", maxRestorableVersion.present());
+
+	auto formatVersion = [&](Version v) {
+		JsonBuilderObject doc;
+		doc.setKey("Version", v);
+		if(!versionTimeMap.empty()) {
+			auto i = versionTimeMap.find(v);
+			if(i != versionTimeMap.end()) {
+				doc.setKey("Timestamp", BackupAgentBase::formatTime(i->second));
+				doc.setKey("EpochSeconds", i->second);
+			}
+		}
+		else if(maxLogEnd.present()) {
+			double days = double(v - maxLogEnd.get()) / (CLIENT_KNOBS->CORE_VERSIONSPERSECOND * 24 * 60 * 60);
+			doc.setKey("RelativeDays", days);
+		}
+		return doc;
+	};
+
+	JsonBuilderArray snapshotsArray;
+	for(const KeyspaceSnapshotFile &m : snapshots) {
+		JsonBuilderObject snapshotDoc;
+		snapshotDoc.setKey("Start", formatVersion(m.beginVersion));
+		snapshotDoc.setKey("End", formatVersion(m.endVersion));
+		snapshotDoc.setKey("Restorable", m.restorable.orDefault(false));
+		snapshotDoc.setKey("TotalBytes", m.totalSize);
+		snapshotDoc.setKey("PercentageExpired", m.expiredPct(expiredEndVersion));
+		snapshotsArray.push_back(snapshotDoc);
+	}
+	doc.setKey("Snapshots", snapshotsArray);
+
+	doc.setKey("TotalSnapshotBytes", snapshotBytes);
+
+	if(expiredEndVersion.present())
+		doc.setKey("ExpiredEnd", formatVersion(expiredEndVersion.get()));
+	if(unreliableEndVersion.present())
+		doc.setKey("UnreliableEnd", formatVersion(unreliableEndVersion.get()));
+	if(minLogBegin.present())
+		doc.setKey("MinLogBegin", formatVersion(minLogBegin.get()));
+	if(contiguousLogEnd.present())
+		doc.setKey("ContiguousLogEnd", formatVersion(contiguousLogEnd.get()));
+	if(maxLogEnd.present())
+		doc.setKey("MaxLogEnd", formatVersion(maxLogEnd.get()));
+	if(minRestorableVersion.present())
+		doc.setKey("MinRestorablePoint", formatVersion(minRestorableVersion.get()));
+	if(maxRestorableVersion.present())
+		doc.setKey("MaxRestorablePoint", formatVersion(maxRestorableVersion.get()));
+
+	if(!extendedDetail.empty())
+		doc.setKey("ExtendedDetail", extendedDetail);
+
+	return doc.getJson();
 }
 
 /* BackupContainerFileSystem implements a backup container which stores files in a nested folder structure.
@@ -262,13 +316,13 @@ public:
 
 	// Get the root folder for a snapshot's data based on its begin version
 	static std::string snapshotFolderString(Version snapshotBeginVersion) {
-		return format("kvranges/snapshot.%018lld", snapshotBeginVersion);
+		return format("kvranges/snapshot.%018" PRId64 , snapshotBeginVersion);
 	}
 
 	// Extract the snapshot begin version from a path
 	static Version extractSnapshotBeginVersion(std::string path) {
 		Version snapshotBeginVersion;
-		if(sscanf(path.c_str(), "kvranges/snapshot.%018lld", &snapshotBeginVersion) == 1) {
+		if(sscanf(path.c_str(), "kvranges/snapshot.%018" SCNd64, &snapshotBeginVersion) == 1) {
 			return snapshotBeginVersion;
 		}
 		return invalidVersion;
@@ -280,14 +334,14 @@ public:
 	}
 
 	Future<Reference<IBackupFile>> writeLogFile(Version beginVersion, Version endVersion, int blockSize) {
-		return writeFile(logVersionFolderString(beginVersion) + format("log,%lld,%lld,%s,%d", beginVersion, endVersion, g_random->randomUniqueID().toString().c_str(), blockSize));
+		return writeFile(logVersionFolderString(beginVersion) + format("log,%lld,%lld,%s,%d", beginVersion, endVersion, deterministicRandom()->randomUniqueID().toString().c_str(), blockSize));
 	}
 
 	Future<Reference<IBackupFile>> writeRangeFile(Version snapshotBeginVersion, int snapshotFileCount, Version fileVersion, int blockSize) {
-		std::string fileName = format("range,%lld,%s,%d", fileVersion, g_random->randomUniqueID().toString().c_str(), blockSize);
+		std::string fileName = format("range,%" PRId64 ",%s,%d", fileVersion, deterministicRandom()->randomUniqueID().toString().c_str(), blockSize);
 
 		// In order to test backward compatibility in simulation, sometimes write to the old path format
-		if(g_network->isSimulated() && g_random->coinflip()) {
+		if(g_network->isSimulated() && deterministicRandom()->coinflip()) {
 			return writeFile(old_rangeVersionFolderString(fileVersion) + fileName);
 		}
 
@@ -300,7 +354,7 @@ public:
 		f.fileName = path;
 		f.fileSize = size;
 		int len;
-		if(sscanf(name.c_str(), "range,%lld,%*[^,],%u%n", &f.version, &f.blockSize, &len) == 2 && len == name.size()) {
+		if(sscanf(name.c_str(), "range,%" SCNd64 ",%*[^,],%u%n", &f.version, &f.blockSize, &len) == 2 && len == name.size()) {
 			out = f;
 			return true;
 		}
@@ -313,7 +367,7 @@ public:
 		f.fileName = path;
 		f.fileSize = size;
 		int len;
-		if(sscanf(name.c_str(), "log,%lld,%lld,%*[^,],%u%n", &f.beginVersion, &f.endVersion, &f.blockSize, &len) == 3 && len == name.size()) {
+		if(sscanf(name.c_str(), "log,%" SCNd64 ",%" SCNd64 ",%*[^,],%u%n", &f.beginVersion, &f.endVersion, &f.blockSize, &len) == 3 && len == name.size()) {
 			out = f;
 			return true;
 		}
@@ -325,7 +379,7 @@ public:
 		KeyspaceSnapshotFile f;
 		f.fileName = path;
 		int len;
-		if(sscanf(name.c_str(), "snapshot,%lld,%lld,%lld%n", &f.beginVersion, &f.endVersion, &f.totalSize, &len) == 3 && len == name.size()) {
+		if(sscanf(name.c_str(), "snapshot,%" SCNd64 ",%" SCNd64 ",%" SCNd64 "%n", &f.beginVersion, &f.endVersion, &f.totalSize, &len) == 3 && len == name.size()) {
 			out = f;
 			return true;
 		}
@@ -345,7 +399,7 @@ public:
 		state Reference<IAsyncFile> f = wait(bc->readFile(snapshot.fileName));
 		int64_t size = wait(f->size());
 		state Standalone<StringRef> buf = makeString(size);
-		int _ = wait(f->read(mutateString(buf), buf.size(), 0));
+		wait(success(f->read(mutateString(buf), buf.size(), 0)));
 		json_spirit::mValue json;
 		json_spirit::read_string(buf.toString(), json);
 		JSONDoc doc(json);
@@ -606,13 +660,13 @@ public:
 		state Optional<Version> metaUnreliableEnd;
 
 		std::vector<Future<Void>> metaReads;
-		metaReads.push_back(store(bc->expiredEndVersion().get(), metaExpiredEnd));
-		metaReads.push_back(store(bc->unreliableEndVersion().get(), metaUnreliableEnd));
+		metaReads.push_back(store(metaExpiredEnd, bc->expiredEndVersion().get()));
+		metaReads.push_back(store(metaUnreliableEnd, bc->unreliableEndVersion().get()));
 
 		// Only read log begin/end versions if not doing a deep scan, otherwise scan files and recalculate them.
 		if(!deepScan) {
-			metaReads.push_back(store(bc->logBeginVersion().get(), metaLogBegin));
-			metaReads.push_back(store(bc->logEndVersion().get(), metaLogEnd));
+			metaReads.push_back(store(metaLogBegin, bc->logBeginVersion().get()));
+			metaReads.push_back(store(metaLogEnd, bc->logEndVersion().get()));
 		}
 
 		wait(waitForAll(metaReads));
@@ -682,7 +736,7 @@ public:
 		}
 
 		state std::vector<LogFile> logs;
-		wait(store(bc->listLogFiles(scanBegin, scanEnd), logs) && store(bc->listKeyspaceSnapshots(), desc.snapshots));
+		wait(store(logs, bc->listLogFiles(scanBegin, scanEnd)) && store(desc.snapshots, bc->listKeyspaceSnapshots()));
 
 		// List logs in version order so log continuity can be analyzed
 		std::sort(logs.begin(), logs.end());
@@ -842,7 +896,7 @@ public:
 			progress->step = "Listing files";
 		}
 		// Get log files or range files that contain any data at or before expireEndVersion
-		wait(store(bc->listLogFiles(scanBegin, expireEndVersion - 1), logs) && store(bc->listRangeFiles(scanBegin, expireEndVersion - 1), ranges));
+		wait(store(logs, bc->listLogFiles(scanBegin, expireEndVersion - 1)) && store(ranges, bc->listRangeFiles(scanBegin, expireEndVersion - 1)));
 
 		// The new logBeginVersion will be taken from the last log file, if there is one
 		state Optional<Version> newLogBeginVersion;
@@ -1072,7 +1126,7 @@ public:
 			int rs = wait(f->read((uint8_t *)s.data(), size, 0));
 			Version v;
 			int len;
-			if(rs == size && sscanf(s.c_str(), "%lld%n", &v, &len) == 1 && len == size)
+			if(rs == size && sscanf(s.c_str(), "%" SCNd64 "%n", &v, &len) == 1 && len == size)
 				return v;
 
 			TraceEvent(SevWarn, "BackupContainerInvalidProperty")
@@ -1170,7 +1224,7 @@ public:
 		if(g_network->isSimulated()) {
 			if(!fileExists(fullPath))
 				throw file_not_found();
-			std::string uniquePath = fullPath + "." + g_random->randomUniqueID().toString() + ".lnk";
+			std::string uniquePath = fullPath + "." + deterministicRandom()->randomUniqueID().toString() + ".lnk";
 			unlink(uniquePath.c_str());
 			ASSERT(symlink(basename(path).c_str(), uniquePath.c_str()) == 0);
 			fullPath = uniquePath = uniquePath;
@@ -1179,7 +1233,31 @@ public:
 		// can't be used because backup files are read-only.  Cached mode can only help during restore task retries handled
 		// by the same process that failed the first task execution anyway, which is a very rare case.
 		#endif
-		return IAsyncFileSystem::filesystem()->open(fullPath, flags, 0644);
+		Future<Reference<IAsyncFile>> f = IAsyncFileSystem::filesystem()->open(fullPath, flags, 0644);
+
+		if(g_network->isSimulated()) {
+			int blockSize = 0;
+			// Extract block size from the filename, if present
+			size_t lastComma = path.find_last_of(',');
+			if(lastComma != path.npos) {
+				blockSize = atoi(path.substr(lastComma + 1).c_str());
+			}
+			if(blockSize <= 0) {
+				blockSize = deterministicRandom()->randomInt(1e4, 1e6);
+			}
+			if(deterministicRandom()->random01() < .01) {
+				blockSize /= deterministicRandom()->randomInt(1, 3);
+			}
+
+			return map(f, [=](Reference<IAsyncFile> fr) {
+				int readAhead = deterministicRandom()->randomInt(0, 3);
+				int reads = deterministicRandom()->randomInt(1, 3);
+				int cacheSize = deterministicRandom()->randomInt(0, 3);
+				return Reference<IAsyncFile>(new AsyncFileReadAheadCache(fr, blockSize, readAhead, reads, cacheSize));
+			});
+		}
+
+		return f;
 	}
 
 	class BackupFile : public IBackupFile, ReferenceCounted<BackupFile> {
@@ -1217,7 +1295,7 @@ public:
 		int flags = IAsyncFile::OPEN_NO_AIO | IAsyncFile::OPEN_CREATE | IAsyncFile::OPEN_ATOMIC_WRITE_AND_CREATE | IAsyncFile::OPEN_READWRITE;
 		std::string fullPath = joinPath(m_path, path);
 		platform::createDirectory(parentDirectory(fullPath));
-		std::string temp = fullPath  + "." + g_random->randomUniqueID().toString() + ".temp";
+		std::string temp = fullPath  + "." + deterministicRandom()->randomUniqueID().toString() + ".temp";
 		Future<Reference<IAsyncFile>> f = IAsyncFileSystem::filesystem()->open(temp, flags, 0644);
 		return map(f, [=](Reference<IAsyncFile> f) {
 			return Reference<IBackupFile>(new BackupFile(path, f, fullPath));
@@ -1303,7 +1381,8 @@ public:
 				m_bucket = kv.second;
 				continue;
 			}
-			TraceEvent(SevWarn, "BackupContainerBlobStoreInvalidParameter").detail("Name", printable(kv.first)).detail("Value", printable(kv.second));
+			TraceEvent(SevWarn, "BackupContainerBlobStoreInvalidParameter").detail("Name", kv.first).detail("Value", kv.second);
+			IBackupContainer::lastOpenError = format("Unknown URL parameter: '%s'", kv.first.c_str());
 			throw backup_invalid_url();
 		}
 	}
@@ -1334,7 +1413,7 @@ public:
 		BlobStoreEndpoint::ListResult contents = wait(bstore->listBucket(bucket, basePath));
 		std::vector<std::string> results;
 		for(auto &f : contents.objects) {
-			results.push_back(bstore->getResourceURL(f.name.substr(basePath.size())));
+			results.push_back(bstore->getResourceURL(f.name.substr(basePath.size()), format("bucket=%s", bucket.c_str())));
 		}
 		return results;
 	}
@@ -1552,20 +1631,11 @@ ACTOR Future<Version> timeKeeperVersionFromDatetime(std::string datetime, Databa
 	state KeyBackedMap<int64_t, Version> versionMap(timeKeeperPrefixRange.begin);
 	state Reference<ReadYourWritesTransaction> tr = Reference<ReadYourWritesTransaction>(new ReadYourWritesTransaction(db));
 
-	int year, month, day, hour, minute, second;
-	if (sscanf(datetime.c_str(), "%d-%d-%d.%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) {
-		fprintf(stderr, "ERROR: Incorrect date/time format.\n");
+	state int64_t time = BackupAgentBase::parseTime(datetime);
+	if(time < 0) {
+		fprintf(stderr, "ERROR: Incorrect date/time or format.  Format is %s.\n", BackupAgentBase::timeFormat().c_str());
 		throw backup_error();
 	}
-	struct tm expDateTime = {0};
-	expDateTime.tm_year = year - 1900;
-	expDateTime.tm_mon = month - 1;
-	expDateTime.tm_mday = day;
-	expDateTime.tm_hour = hour;
-	expDateTime.tm_min = minute;
-	expDateTime.tm_sec = second;
-	expDateTime.tm_isdst = -1;
-	state int64_t time = (int64_t) mktime(&expDateTime);
 
 	loop {
 		try {
@@ -1575,7 +1645,7 @@ ACTOR Future<Version> timeKeeperVersionFromDatetime(std::string datetime, Databa
 			if (results.size() != 1) {
 				// No key less than time was found in the database
 				// Look for a key >= time.
-				wait( store( versionMap.getRange(tr, time, std::numeric_limits<int64_t>::max(), 1), results) );
+				wait( store( results, versionMap.getRange(tr, time, std::numeric_limits<int64_t>::max(), 1) ) );
 
 				if(results.size() != 1) {
 					fprintf(stderr, "ERROR: Unable to calculate a version for given date/time.\n");
@@ -1615,7 +1685,7 @@ ACTOR Future<Optional<int64_t>> timeKeeperEpochsFromVersion(Version v, Reference
 			if(mid == min) {
 				// There aren't any records having a version < v, so just look for any record having a time < now
 				// and base a result on it
-				wait(store(versionMap.getRange(tr, 0, (int64_t)now(), 1), results));
+				wait(store(results, versionMap.getRange(tr, 0, (int64_t)now(), 1)));
 
 				if (results.size() != 1) {
 					// There aren't any timekeeper records to base a result on so return nothing
@@ -1660,7 +1730,7 @@ ACTOR Future<Void> writeAndVerifyFile(Reference<IBackupContainer> c, Reference<I
 	if(size > 0) {
 		content = makeString(size);
 		for(int i = 0; i < content.size(); ++i)
-			mutateString(content)[i] = (uint8_t)g_random->randomInt(0, 256);
+			mutateString(content)[i] = (uint8_t)deterministicRandom()->randomInt(0, 256);
 
 		wait(f->append(content.begin(), content.size()));
 	}
@@ -1679,7 +1749,7 @@ ACTOR Future<Void> writeAndVerifyFile(Reference<IBackupContainer> c, Reference<I
 
 // Randomly advance version by up to 1 second of versions
 Version nextVersion(Version v) {
-	int64_t increment = g_random->randomInt64(1, CLIENT_KNOBS->CORE_VERSIONSPERSECOND);
+	int64_t increment = deterministicRandom()->randomInt64(1, CLIENT_KNOBS->CORE_VERSIONSPERSECOND);
 	return v + increment;
 }
 
@@ -1703,20 +1773,20 @@ ACTOR Future<Void> testBackupContainer(std::string url) {
 	state std::map<Version, int64_t> snapshotSizes;
 	state int nRangeFiles = 0;
 	state std::map<Version, std::string> logs;
-	state Version v = g_random->randomInt64(0, std::numeric_limits<Version>::max() / 2);
+	state Version v = deterministicRandom()->randomInt64(0, std::numeric_limits<Version>::max() / 2);
 
 	// List of sizes to use to test edge cases on underlying file implementations
 	state std::vector<int> fileSizes = {0, 10000000, 5000005};
 
 	loop {
 		state Version logStart = v;
-		state int kvfiles = g_random->randomInt(0, 3);
+		state int kvfiles = deterministicRandom()->randomInt(0, 3);
 
 		while(kvfiles > 0) {
 			if(snapshots.empty()) {
 				snapshots[v] = {};
 				snapshotSizes[v] = 0;
-				if(g_random->coinflip()) {
+				if(deterministicRandom()->coinflip()) {
 					v = nextVersion(v);
 				}
 			}
@@ -1729,7 +1799,7 @@ ACTOR Future<Void> testBackupContainer(std::string url) {
 			snapshotSizes.rbegin()->second += size;
 			writes.push_back(writeAndVerifyFile(c, range, size));
 
-			if(g_random->random01() < .2) {
+			if(deterministicRandom()->random01() < .2) {
 				writes.push_back(c->writeKeyspaceSnapshotFile(snapshots.rbegin()->second, snapshotSizes.rbegin()->second));
 				snapshots[v] = {};
 				snapshotSizes[v] = 0;
@@ -1739,7 +1809,7 @@ ACTOR Future<Void> testBackupContainer(std::string url) {
 			--kvfiles;
 		}
 
-		if(logStart == v || g_random->coinflip()) {
+		if(logStart == v || deterministicRandom()->coinflip()) {
 			v = nextVersion(v);
 		}
 		state Reference<IBackupFile> log = wait(c->writeLogFile(logStart, v, 10));
@@ -1748,7 +1818,7 @@ ACTOR Future<Void> testBackupContainer(std::string url) {
 		writes.push_back(writeAndVerifyFile(c, log, size));
 
 		// Randomly stop after a snapshot has finished and all manually seeded file sizes have been used.
-		if(fileSizes.empty() && !snapshots.empty() && snapshots.rbegin()->second.empty() && g_random->random01() < .2) {
+		if(fileSizes.empty() && !snapshots.empty() && snapshots.rbegin()->second.empty() && deterministicRandom()->random01() < .2) {
 			snapshots.erase(snapshots.rbegin()->first);
 			break;
 		}
@@ -1767,19 +1837,23 @@ ACTOR Future<Void> testBackupContainer(std::string url) {
 	// Do a series of expirations and verify resulting state
 	state int i = 0;
 	for(; i < listing.snapshots.size(); ++i) {
-		// Ensure we can still restore to the latest version
-		Optional<RestorableFileSet> rest = wait(c->getRestoreSet(desc.maxRestorableVersion.get()));
-		ASSERT(rest.present());
+		{
+			// Ensure we can still restore to the latest version
+			Optional<RestorableFileSet> rest = wait(c->getRestoreSet(desc.maxRestorableVersion.get()));
+			ASSERT(rest.present());
+		}
 
-		// Ensure we can restore to the end version of snapshot i
-		Optional<RestorableFileSet> rest = wait(c->getRestoreSet(listing.snapshots[i].endVersion));
-		ASSERT(rest.present());
+		{
+			// Ensure we can restore to the end version of snapshot i
+			Optional<RestorableFileSet> rest = wait(c->getRestoreSet(listing.snapshots[i].endVersion));
+			ASSERT(rest.present());
+		}
 
 		// Test expiring to the end of this snapshot
 		state Version expireVersion = listing.snapshots[i].endVersion;
 
 		// Expire everything up to but not including the snapshot end version
-		printf("EXPIRE TO %lld\n", expireVersion);
+		printf("EXPIRE TO %" PRId64 "\n", expireVersion);
 		state Future<Void> f = c->expireData(expireVersion);
 		wait(ready(f));
 
@@ -1840,3 +1914,19 @@ TEST_CASE("/backup/containers_list") {
 	}
 	return Void();
 };
+
+TEST_CASE("/backup/time") {
+	// test formatTime()
+	for(int i = 0; i < 1000; ++i) {
+		int64_t ts = deterministicRandom()->randomInt64(0, std::numeric_limits<int32_t>::max());
+		ASSERT(BackupAgentBase::parseTime(BackupAgentBase::formatTime(ts)) == ts);
+	}
+
+	ASSERT(BackupAgentBase::parseTime("2019/03/18.17:51:11-0600") == BackupAgentBase::parseTime("2019/03/18.16:51:11-0700"));
+	ASSERT(BackupAgentBase::parseTime("2019/03/31.22:45:07-0700") == BackupAgentBase::parseTime("2019/04/01.03:45:07-0200"));
+	ASSERT(BackupAgentBase::parseTime("2019/03/31.22:45:07+0000") == BackupAgentBase::parseTime("2019/04/01.03:45:07+0500"));
+	ASSERT(BackupAgentBase::parseTime("2019/03/31.22:45:07+0030") == BackupAgentBase::parseTime("2019/04/01.03:45:07+0530"));
+	ASSERT(BackupAgentBase::parseTime("2019/03/31.22:45:07+0030") == BackupAgentBase::parseTime("2019/04/01.04:00:07+0545"));
+
+	return Void();
+}

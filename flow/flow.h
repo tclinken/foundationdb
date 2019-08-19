@@ -44,10 +44,21 @@
 #include "flow/Deque.h"
 #include "flow/ThreadPrimitives.h"
 #include "flow/network.h"
+#include "flow/FileIdentifier.h"
+
+#include <boost/version.hpp>
 
 using namespace std::rel_ops;
 
-#define TEST( condition ) if (!(condition)); else { static TraceEvent* __test = &(TraceEvent("CodeCoverage").detail("File", __FILE__).detail("Line",__LINE__).detail("Condition", #condition)); }
+#define TEST(condition)                                                                                                \
+	if (!(condition)) {                                                                                                \
+	} else {                                                                                                           \
+		static TraceEvent* __test = &(TraceEvent("CodeCoverage")                                                       \
+		                                  .detail("File", __FILE__)                                                    \
+		                                  .detail("Line", __LINE__)                                                    \
+		                                  .detail("Condition", #condition));                                           \
+		(void)__test;                                                                                                  \
+	}
 
 /*
 usage:
@@ -57,14 +68,20 @@ if (BUGGIFY) (
 )
 */
 
-extern double P_BUGGIFIED_SECTION_ACTIVATED, P_BUGGIFIED_SECTION_FIRES, P_EXPENSIVE_VALIDATION;
-int getSBVar(std::string file, int line);
-void enableBuggify(bool enabled);   // Currently controls buggification and (randomized) expensive validation
-bool validationIsEnabled();
+extern std::vector<double> P_BUGGIFIED_SECTION_ACTIVATED, P_BUGGIFIED_SECTION_FIRES;
+extern double P_EXPENSIVE_VALIDATION;
+enum class BuggifyType : uint8_t {
+	General=0, Client
+};
+bool isBuggifyEnabled(BuggifyType type);
+void clearBuggifySections(BuggifyType type);
+int getSBVar(std::string file, int line, BuggifyType);
+void enableBuggify(bool enabled, BuggifyType type);   // Currently controls buggification and (randomized) expensive validation
+bool validationIsEnabled(BuggifyType type);
 
-#define BUGGIFY_WITH_PROB(x) (getSBVar(__FILE__, __LINE__) && g_random->random01() < (x))
-#define BUGGIFY BUGGIFY_WITH_PROB(P_BUGGIFIED_SECTION_FIRES)
-#define EXPENSIVE_VALIDATION (validationIsEnabled() && g_random->random01() < P_EXPENSIVE_VALIDATION)
+#define BUGGIFY_WITH_PROB(x) (getSBVar(__FILE__, __LINE__, BuggifyType::General) && deterministicRandom()->random01() < (x))
+#define BUGGIFY BUGGIFY_WITH_PROB(P_BUGGIFIED_SECTION_FIRES[int(BuggifyType::General)])
+#define EXPENSIVE_VALIDATION (validationIsEnabled(BuggifyType::General) && deterministicRandom()->random01() < P_EXPENSIVE_VALIDATION)
 
 extern Optional<uint64_t> parse_with_suffix(std::string toparse, std::string default_unit = "");
 extern std::string format(const char* form, ...);
@@ -104,104 +121,17 @@ Standalone<StringRef> concatenate( Iter b, Iter const& e ) {
 
 class Void {
 public:
+	constexpr static FileIdentifier file_identifier = 2010442;
 	template <class Ar>
-	void serialize(Ar&) {}
+	void serialize(Ar& ar) {
+		serializer(ar);
+	}
 };
 
 class Never {};
 
 template <class T>
-class Optional {
-public:
-	Optional() : valid(false) {}
-	Optional(const Optional<T>& o) : valid(o.valid) {
-		if (valid) new (&value) T(o.get());
-	}
-
-	template <class U>
-	Optional(const U& t) : valid(true) { new (&value) T(t); }
-
-	/* This conversion constructor was nice, but combined with the prior constructor it means that Optional<int> can be converted to Optional<Optional<int>> in the wrong way
-	(a non-present Optional<int> converts to a non-present Optional<Optional<int>>).
-	Use .castTo<>() instead.
-	template <class S> Optional(const Optional<S>& o) : valid(o.present()) { if (valid) new (&value) T(o.get()); } */
-
-	Optional(Arena& a, const Optional<T>& o) : valid(o.valid) {
-		if (valid) new (&value) T(a, o.get());
-	}
-	int expectedSize() const { return valid ? get().expectedSize() : 0; }
-
-	template <class R> Optional<R> castTo() const {
-		return map<R>([](const T& v){ return (R)v; });
-	}
-
-	template <class R> Optional<R> map(std::function<R(T)> f) const {
-		if (present()) {
-			return Optional<R>(f(get()));
-		}
-		else {
-			return Optional<R>();
-		}
-	}
-
-	~Optional() {
-		if (valid) ((T*)&value)->~T();
-	}
-
-	Optional & operator=(Optional const& o) {
-		if (valid) {
-			valid = false;
-			((T*)&value)->~T();
-		}
-		if (o.valid) {
-			new (&value) T(o.get());
-			valid = true;
-		}
-		return *this;
-	}
-
-	bool present() const { return valid; }
-	T& get() {
-		UNSTOPPABLE_ASSERT(valid);
-		return *(T*)&value;
-	}
-	T const& get() const {
-		UNSTOPPABLE_ASSERT(valid);
-		return *(T const*)&value;
-	}
-	T orDefault(T const& default_value) const { if (valid) return get(); else return default_value; }
-
-	template <class Ar>
-	void serialize(Ar& ar) {
-		// SOMEDAY: specialize for space efficiency?
-		if (valid && Ar::isDeserializing)
-			(*(T *)&value).~T();
-		serializer(ar, valid);
-		if (valid) {
-			if (Ar::isDeserializing) new (&value) T();
-			serializer(ar, *(T*)&value);
-		}
-	}
-
-	bool operator == (Optional const& o) const {
-		return present() == o.present() && (!present() || get() == o.get());
-	}
-	bool operator != (Optional const& o) const {
-		return !(*this == o);
-	}
-	// Ordering: If T is ordered, then Optional() < Optional(t) and (Optional(u)<Optional(v))==(u<v)
-	bool operator < (Optional const& o) const {
-		if (present() != o.present()) return o.present();
-		if (!present()) return false;
-		return get() < o.get();
-	}
-private:
-	typename std::aligned_storage< sizeof(T), __alignof(T) >::type value;
-	bool valid;
-};
-
-template <class T>
-class ErrorOr {
+class ErrorOr : public ComposedIdentifier<T, 0x1> {
 public:
 	ErrorOr() : error(default_error_or()) {}
 	ErrorOr(Error const& error) : error(error) {}
@@ -268,11 +198,41 @@ public:
 
 	bool isError() const { return error.code() != invalid_error_code; }
 	bool isError(int code) const { return error.code() == code; }
-	Error getError() const { ASSERT(isError()); return error; }
+	const Error& getError() const { ASSERT(isError()); return error; }
 
 private:
 	typename std::aligned_storage< sizeof(T), __alignof(T) >::type value;
 	Error error;
+};
+
+template <class T>
+struct union_like_traits<ErrorOr<T>> : std::true_type {
+	using Member = ErrorOr<T>;
+	using alternatives = pack<Error, T>;
+	template <class Context>
+	static uint8_t index(const Member& variant, Context&) { return variant.present() ? 1 : 0; }
+	template <class Context>
+	static bool empty(const Member& variant, Context&) { return false; }
+
+	template <int i, class Context>
+	static const index_t<i, alternatives>& get(const Member& m, Context&) {
+		if constexpr (i == 0) {
+			return m.getError();
+		} else {
+			static_assert(i == 1, "ErrorOr only has two members");
+			return m.get();
+		}
+	}
+
+	template <int i, class Alternative, class Context>
+	static const void assign(Member& m, const Alternative& a, Context&) {
+		if constexpr (i == 0) {
+			m = a;
+		} else {
+			static_assert(i == 1);
+			m = a;
+		}
+	}
 };
 
 template <class T>
@@ -616,7 +576,7 @@ public:
 		if (sav) sav->addFutureRef();
 		//if (sav->endpoint.isValid()) cout << "Future copied for " << sav->endpoint.key << endl;
 	}
-	Future(Future<T>&& rhs) noexcept(true) : sav(rhs.sav) {
+	Future(Future<T>&& rhs) BOOST_NOEXCEPT : sav(rhs.sav) {
 		rhs.sav = 0;
 		//if (sav->endpoint.isValid()) cout << "Future moved for " << sav->endpoint.key << endl;
 	}
@@ -636,6 +596,11 @@ public:
 		sav->sendError(error);
 	}
 
+#ifndef NO_INTELLISENSE
+	template<class U>
+	Future(const U&, typename std::enable_if<std::is_assignable<T, U>::value, int*>::type = 0) {}
+#endif
+
 	~Future() {
 		//if (sav && sav->endpoint.isValid()) cout << "Future destroyed for " << sav->endpoint.key << endl;
 		if (sav) sav->delFutureRef();
@@ -645,7 +610,7 @@ public:
 		if (sav) sav->delFutureRef();
 		sav = rhs.sav;
 	}
-	void operator=(Future<T>&& rhs) noexcept(true) {
+	void operator=(Future<T>&& rhs) BOOST_NOEXCEPT {
 		if (sav != rhs.sav) {
 			if (sav) sav->delFutureRef();
 			sav = rhs.sav;
@@ -721,7 +686,7 @@ public:
 	bool isValid() const { return sav != NULL; }
 	Promise() : sav(new SAV<T>(0, 1)) {}
 	Promise(const Promise& rhs) : sav(rhs.sav) { sav->addPromiseRef(); }
-	Promise(Promise&& rhs) noexcept(true) : sav(rhs.sav) { rhs.sav = 0; }
+	Promise(Promise&& rhs) BOOST_NOEXCEPT : sav(rhs.sav) { rhs.sav = 0; }
 	~Promise() { if (sav) sav->delPromiseRef(); }
 
 	void operator=(const Promise& rhs) {
@@ -729,7 +694,7 @@ public:
 		if (sav) sav->delPromiseRef();
 		sav = rhs.sav;
 	}
-	void operator=(Promise && rhs) noexcept(true) {
+	void operator=(Promise && rhs) BOOST_NOEXCEPT {
 		if (sav != rhs.sav) {
 			if (sav) sav->delPromiseRef();
 			sav = rhs.sav;
@@ -774,14 +739,14 @@ public:
 	}
 	FutureStream() : queue(NULL) {}
 	FutureStream(const FutureStream& rhs) : queue(rhs.queue) { queue->addFutureRef(); }
-	FutureStream(FutureStream&& rhs) noexcept(true) : queue(rhs.queue) { rhs.queue = 0; }
+	FutureStream(FutureStream&& rhs) BOOST_NOEXCEPT : queue(rhs.queue) { rhs.queue = 0; }
 	~FutureStream() { if (queue) queue->delFutureRef(); }
 	void operator=(const FutureStream& rhs) {
 		rhs.queue->addFutureRef();
 		if (queue) queue->delFutureRef();
 		queue = rhs.queue;
 	}
-	void operator=(FutureStream&& rhs) noexcept(true) {
+	void operator=(FutureStream&& rhs) BOOST_NOEXCEPT {
 		if (rhs.queue != queue) {
 			if (queue) queue->delFutureRef();
 			queue = rhs.queue;
@@ -856,7 +821,7 @@ public:
 		return getReplyPromise(value).getFuture();
 	}
 	template <class X>
-	Future<REPLY_TYPE(X)> getReply(const X& value, int taskID) const {
+	Future<REPLY_TYPE(X)> getReply(const X& value, TaskPriority taskID) const {
 		setReplyPriority(value, taskID);
 		return getReplyPromise(value).getFuture();
 	}
@@ -866,7 +831,7 @@ public:
 		return getReply(Promise<X>());
 	}
 	template <class X>
-	Future<X> getReplyWithTaskID(int taskID) const {
+	Future<X> getReplyWithTaskID(TaskPriority taskID) const {
 		Promise<X> reply;
 		reply.getEndpoint(taskID);
 		return getReply(reply);
@@ -875,13 +840,13 @@ public:
 	FutureStream<T> getFuture() const { queue->addFutureRef(); return FutureStream<T>(queue); }
 	PromiseStream() : queue(new NotifiedQueue<T>(0, 1)) {}
 	PromiseStream(const PromiseStream& rhs) : queue(rhs.queue) { queue->addPromiseRef(); }
-	PromiseStream(PromiseStream&& rhs) noexcept(true) : queue(rhs.queue) { rhs.queue = 0; }
+	PromiseStream(PromiseStream&& rhs) BOOST_NOEXCEPT : queue(rhs.queue) { rhs.queue = 0; }
 	void operator=(const PromiseStream& rhs) {
 		rhs.queue->addPromiseRef();
 		if (queue) queue->delPromiseRef();
 		queue = rhs.queue;
 	}
-	void operator=(PromiseStream&& rhs) noexcept(true) {
+	void operator=(PromiseStream&& rhs) BOOST_NOEXCEPT {
 		if (queue != rhs.queue) {
 			if (queue) queue->delPromiseRef();
 			queue = rhs.queue;
@@ -947,10 +912,11 @@ struct ActorSingleCallback : SingleCallback<ValueType> {
 	}
 };
 inline double now() { return g_network->now(); }
-inline Future<Void> delay(double seconds, int taskID = TaskDefaultDelay) { return g_network->delay(seconds, taskID); }
-inline Future<Void> delayUntil(double time, int taskID = TaskDefaultDelay) { return g_network->delay(std::max(0.0, time - g_network->now()), taskID); }
-inline Future<Void> delayJittered(double seconds, int taskID = TaskDefaultDelay) { return g_network->delay(seconds*(FLOW_KNOBS->DELAY_JITTER_OFFSET + FLOW_KNOBS->DELAY_JITTER_RANGE*g_random->random01()), taskID); }
-inline Future<Void> yield(int taskID = TaskDefaultYield) { return g_network->yield(taskID); }
-inline bool check_yield(int taskID = TaskDefaultYield) { return g_network->check_yield(taskID); }
+inline Future<Void> delay(double seconds, TaskPriority taskID = TaskPriority::DefaultDelay) { return g_network->delay(seconds, taskID); }
+inline Future<Void> delayUntil(double time, TaskPriority taskID = TaskPriority::DefaultDelay) { return g_network->delay(std::max(0.0, time - g_network->now()), taskID); }
+inline Future<Void> delayJittered(double seconds, TaskPriority taskID = TaskPriority::DefaultDelay) { return g_network->delay(seconds*(FLOW_KNOBS->DELAY_JITTER_OFFSET + FLOW_KNOBS->DELAY_JITTER_RANGE*deterministicRandom()->random01()), taskID); }
+inline Future<Void> yield(TaskPriority taskID = TaskPriority::DefaultYield) { return g_network->yield(taskID); }
+inline bool check_yield(TaskPriority taskID = TaskPriority::DefaultYield) { return g_network->check_yield(taskID); }
+
 #include "flow/genericactors.actor.h"
 #endif

@@ -79,7 +79,7 @@ class SingleFloat(object):
             self.value = ctypes.c_float(value).value
         elif isinstance(value, ctypes.c_float):
             self.value = value.value
-        elif isinstance(value, six.integertypes):
+        elif isinstance(value, six.integer_types):
             self.value = ctypes.c_float(value).value
         else:
             raise ValueError("Incompatible type for single-precision float: " + repr(value))
@@ -180,8 +180,11 @@ class Versionstamp(object):
         return "Versionstamp(" + repr(self.tr_version) + ", " + str(self.user_version) + ")"
 
     def to_bytes(self):
+        tr_version = self.tr_version
+        if isinstance(tr_version, fdb.impl.Value):
+            tr_version = tr_version.value
         return struct.pack(self._STRUCT_FORMAT_STRING,
-                           self.tr_version if self.is_complete() else self._UNSET_TR_VERSION,
+                           tr_version if self.is_complete() else self._UNSET_TR_VERSION,
                            self.user_version)
 
     def completed(self, new_tr_version):

@@ -27,7 +27,7 @@
 #elif !defined(WORKLOADS_ASYNCFILE_ACTOR_H)
 	#define WORKLOADS_ASYNCFILE_ACTOR_H
 
-#include "fdbserver/workloads/workloads.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbrpc/IAsyncFile.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
@@ -99,7 +99,7 @@ struct AsyncFileWorkload : TestWorkload
 		state bool fileCreated = self->path.length() == 0;
 		if(fileCreated)
 		{
-			self->path = "asyncfile." + g_random->randomUniqueID().toString();
+			self->path = "asyncfile." + deterministicRandom()->randomUniqueID().toString();
 			flags &= ~IAsyncFile::OPEN_READONLY;
 			flags |= IAsyncFile::OPEN_READWRITE | IAsyncFile::OPEN_CREATE;
 		}

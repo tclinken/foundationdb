@@ -1,8 +1,12 @@
 export
 PLATFORM := $(shell uname)
 ARCH := $(shell uname -m)
-
 TOPDIR := $(shell pwd)
+
+# Allow custom libc++ hack for Ubuntu
+ifeq ("$(wildcard /etc/centos-release)", "")
+  LIBSTDCPP_HACK ?= 1
+endif
 
 ifeq ($(ARCH),x86_64)
   ARCH := x64
@@ -10,14 +14,14 @@ else
   $(error Not prepared to compile on $(ARCH))
 endif
 
-MONO := $(shell which mono)
+MONO := $(shell which mono 2>/dev/null)
 ifeq ($(MONO),)
   MONO := /usr/bin/mono
 endif
 
-MCS := $(shell which mcs)
+MCS := $(shell which mcs 2>/dev/null)
 ifeq ($(MCS),)
-  MCS := $(shell which dmcs) 
+  MCS := $(shell which dmcs 2>/dev/null)
 endif
 ifeq ($(MCS),)
   MCS := /usr/bin/mcs
@@ -31,15 +35,20 @@ ifeq ($(NIGHTLY),true)
 	CFLAGS += -DFDB_CLEAN_BUILD
 endif
 
+BOOST_BASENAME ?= boost_1_67_0
 ifeq ($(PLATFORM),Linux)
   PLATFORM := linux
 
   CC ?= gcc
   CXX ?= g++
 
-  CXXFLAGS += -std=c++0x
+  ifneq '' '$(findstring clang++,$(CXX))'
+    CXXFLAGS += -Wno-undefined-var-template -Wno-unknown-warning-option -Wno-unused-command-line-argument -Wno-register -Wno-logical-op-parentheses
+  endif
 
-  BOOSTDIR ?= /opt/boost_1_52_0
+  CXXFLAGS += -std=c++17
+
+  BOOST_BASEDIR ?= /opt
   TLS_LIBDIR ?= /usr/local/lib
   DLEXT := so
   java_DLEXT := so
@@ -50,26 +59,33 @@ else ifeq ($(PLATFORM),Darwin)
   CC := /usr/bin/clang
   CXX := /usr/bin/clang
 
-  CFLAGS += -mmacosx-version-min=10.7 -stdlib=libc++
-  CXXFLAGS += -mmacosx-version-min=10.7 -std=c++11 -stdlib=libc++ -msse4.2 -Wno-undefined-var-template -Wno-unknown-warning-option
+  CFLAGS += -mmacosx-version-min=10.14 -stdlib=libc++
+  CXXFLAGS += -mmacosx-version-min=10.14 -std=c++17 -stdlib=libc++ -msse4.2 -Wno-undefined-var-template -Wno-unknown-warning-option
 
   .LIBPATTERNS := lib%.dylib lib%.a
 
-  BOOSTDIR ?= $(HOME)/boost_1_52_0
+  BOOST_BASEDIR ?= ${HOME}
   TLS_LIBDIR ?= /usr/local/lib
   DLEXT := dylib
   java_DLEXT := jnilib
 else
   $(error Not prepared to compile on platform $(PLATFORM))
 endif
+BOOSTDIR ?= ${BOOST_BASEDIR}/${BOOST_BASENAME}
 
-CCACHE := $(shell which ccache)
+CCACHE := $(shell which ccache 2>/dev/null)
 ifneq ($(CCACHE),)
   CCACHE_CC := $(CCACHE) $(CC)
   CCACHE_CXX := $(CCACHE) $(CXX)
 else
   CCACHE_CC := $(CC)
   CCACHE_CXX := $(CXX)
+endif
+
+# Default variables don't get pushed into the environment, but scripts in build/
+# rely on the existence of CC in the environment.
+ifeq ($(origin CC), default)
+  CC := $(CC)
 endif
 
 ACTORCOMPILER := bin/actorcompiler.exe
@@ -98,7 +114,7 @@ FDB_TLS_LIB := lib/libFDBLibTLS.a
 TLS_LIBS += $(addprefix $(TLS_LIBDIR)/,libtls.a libssl.a libcrypto.a)
 endif
 
-CXXFLAGS += -Wno-deprecated
+CXXFLAGS += -Wno-deprecated -DBOOST_ERROR_CODE_HEADER_ONLY -DBOOST_SYSTEM_NO_DEPRECATED
 LDFLAGS :=
 LIBS :=
 STATIC_LIBS :=
@@ -198,6 +214,7 @@ lib/libstdc++.a: $(shell $(CC) -print-file-name=libstdc++_pic.a)
 	done
 	@ar rcs $@ .libstdc++/*.o
 	@rm -r .libstdc++
+
 
 docpreview: javadoc
 	@echo "Generating     docpreview"

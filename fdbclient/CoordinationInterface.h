@@ -25,11 +25,14 @@
 #include "fdbclient/FDBTypes.h"
 #include "fdbrpc/fdbrpc.h"
 #include "fdbrpc/Locality.h"
+#include "fdbclient/MasterProxyInterface.h"
+#include "fdbclient/ClusterInterface.h"
 
 const int MAX_CLUSTER_FILE_BYTES = 60000;
 
 struct ClientLeaderRegInterface {
 	RequestStream< struct GetLeaderRequest > getLeader;
+	RequestStream< struct OpenDatabaseCoordRequest > openDatabase;
 
 	ClientLeaderRegInterface() {}
 	ClientLeaderRegInterface( NetworkAddress remote );
@@ -66,7 +69,6 @@ public:
 	//  - The description contains only allowed characters (a-z, A-Z, 0-9, _)
 	//  - The ID contains only allowed characters (a-z, A-Z, 0-9)
 	//  - At least one address is specified
-	//  - All addresses either have TLS enabled or disabled (no mixing)
 	//  - There is no address present more than once
 	explicit ClusterConnectionFile( std::string const& path );
 	explicit ClusterConnectionFile(ClusterConnectionString const& cs) : cs(cs), setConn(false) {}
@@ -77,7 +79,7 @@ public:
 	// get a human readable error message describing the error returned from the constructor
 	static std::string getErrorString( std::pair<std::string, bool> const& resolvedFile, Error const& e );
 
-	ClusterConnectionString const& getConnectionString();
+	ClusterConnectionString const& getConnectionString() const;
 	bool writeFile();
 	void setConnectionString( ClusterConnectionString const& );
 	std::string const& getFilename() const { ASSERT( filename.size() ); return filename; }
@@ -92,6 +94,7 @@ private:
 };
 
 struct LeaderInfo {
+	constexpr static FileIdentifier file_identifier = 8338794;
 	UID changeID;
 	static const uint64_t mask = ~(127ll << 57);
 	Value serializedInfo;
@@ -127,6 +130,7 @@ struct LeaderInfo {
 };
 
 struct GetLeaderRequest {
+	constexpr static FileIdentifier file_identifier = 214727;
 	Key key;
 	UID knownLeader;
 	ReplyPromise< Optional<LeaderInfo> > reply;
@@ -137,6 +141,25 @@ struct GetLeaderRequest {
 	template <class Ar>
 	void serialize(Ar& ar) {
 		serializer(ar, key, knownLeader, reply);
+	}
+};
+
+struct OpenDatabaseCoordRequest {
+	constexpr static FileIdentifier file_identifier = 214728;
+	// Sent by the native API to the coordinator to open a database and track client
+	//   info changes.  Returns immediately if the current client info id is different from
+	//   knownClientInfoID; otherwise returns when it next changes (or perhaps after a long interval)
+	Key traceLogGroup;
+	Standalone<VectorRef<StringRef>> issues;
+	Standalone<VectorRef<ClientVersionRef>> supportedVersions;
+	UID knownClientInfoID;
+	Key clusterKey;
+	vector<NetworkAddress> coordinators;
+	ReplyPromise< struct ClientDBInfo > reply;
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, issues, supportedVersions, traceLogGroup, knownClientInfoID, clusterKey, coordinators, reply);
 	}
 };
 

@@ -19,8 +19,8 @@
  */
 
 #include "flow/ActorCollection.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/WorkerInterface.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/WorkerInterface.actor.h"
 #include "fdbserver/WaitFailure.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/ServerDBInfo.h"
@@ -42,8 +42,8 @@ struct LogRouterData {
 
 		TagData( Tag tag, Version popped, Version durableKnownCommittedVersion ) : tag(tag), popped(popped), durableKnownCommittedVersion(durableKnownCommittedVersion) {}
 
-		TagData(TagData&& r) noexcept(true) : version_messages(std::move(r.version_messages)), tag(r.tag), popped(r.popped), durableKnownCommittedVersion(r.durableKnownCommittedVersion) {}
-		void operator= (TagData&& r) noexcept(true) {
+		TagData(TagData&& r) BOOST_NOEXCEPT : version_messages(std::move(r.version_messages)), tag(r.tag), popped(r.popped), durableKnownCommittedVersion(r.durableKnownCommittedVersion) {}
+		void operator= (TagData&& r) BOOST_NOEXCEPT {
 			version_messages = std::move(r.version_messages);
 			tag = r.tag;
 			popped = r.popped;
@@ -51,13 +51,12 @@ struct LogRouterData {
 		}
 
 		// Erase messages not needed to update *from* versions >= before (thus, messages with toversion <= before)
-		ACTOR Future<Void> eraseMessagesBefore( TagData *self, Version before, LogRouterData *tlogData, int taskID ) {
+		ACTOR Future<Void> eraseMessagesBefore( TagData *self, Version before, LogRouterData *tlogData, TaskPriority taskID ) {
 			while(!self->version_messages.empty() && self->version_messages.front().first < before) {
 				Version version = self->version_messages.front().first;
 				int64_t messagesErased = 0;
 
 				while(!self->version_messages.empty() && self->version_messages.front().first == version) {
-					auto const& m = self->version_messages.front();
 					++messagesErased;
 
 					self->version_messages.pop_front();
@@ -69,7 +68,7 @@ struct LogRouterData {
 			return Void();
 		}
 
-		Future<Void> eraseMessagesBefore(Version before, LogRouterData *tlogData, int taskID) {
+		Future<Void> eraseMessagesBefore(Version before, LogRouterData *tlogData, TaskPriority taskID) {
 			return eraseMessagesBefore(this, before, tlogData, taskID);
 		}
 	};
@@ -80,10 +79,15 @@ struct LogRouterData {
 	NotifiedVersion minPopped;
 	Version startVersion;
 	Version minKnownCommittedVersion;
+	Version poppedVersion;
 	Deque<std::pair<Version, Standalone<VectorRef<uint8_t>>>> messageBlocks;
 	Tag routerTag;
 	bool allowPops;
 	LogSet logSet;
+	bool foundEpochEnd;
+
+	CounterCollection cc;
+	Future<Void> logger;
 
 	std::vector<Reference<TagData>> tag_data; //we only store data for the remote tag locality
 
@@ -102,7 +106,9 @@ struct LogRouterData {
 		return newTagData;
 	}
 
-	LogRouterData(UID dbgid, InitializeLogRouterRequest req) : dbgid(dbgid), routerTag(req.routerTag), logSystem(new AsyncVar<Reference<ILogSystem>>()), version(req.startVersion-1), minPopped(req.startVersion-1), startVersion(req.startVersion), allowPops(false), minKnownCommittedVersion(0) {
+	LogRouterData(UID dbgid, const InitializeLogRouterRequest& req) : dbgid(dbgid), routerTag(req.routerTag), logSystem(new AsyncVar<Reference<ILogSystem>>()), 
+	  version(req.startVersion-1), minPopped(0), startVersion(req.startVersion), allowPops(false), minKnownCommittedVersion(0), poppedVersion(0), foundEpochEnd(false),
+		cc("LogRouter", dbgid.toString()) {
 		//setup just enough of a logSet to be able to call getPushLocations
 		logSet.logServers.resize(req.tLogLocalities.size());
 		logSet.tLogPolicy = req.tLogPolicy;
@@ -116,6 +122,12 @@ struct LogRouterData {
 				tagData = createTagData(tag, 0, 0);
 			}
 		}
+
+		specialCounter(cc, "Version", [this](){return this->version.get(); });
+		specialCounter(cc, "MinPopped", [this](){return this->minPopped.get(); });
+		specialCounter(cc, "MinKnownCommittedVersion", [this](){ return this->minKnownCommittedVersion; });
+		specialCounter(cc, "PoppedVersion", [this](){ return this->poppedVersion; });
+		logger = traceCounters("LogRouterMetrics", dbgid, SERVER_KNOBS->WORKER_LOGGING_INTERVAL, &cc, "LogRouterMetrics");
 	}
 };
 
@@ -144,7 +156,7 @@ void commitMessages( LogRouterData* self, Version version, const std::vector<Tag
 
 	for(auto& msg : taggedMessages) {
 		if(msg.message.size() > block.capacity() - block.size()) {
-			self->messageBlocks.push_back( std::make_pair(version, block) );
+			self->messageBlocks.emplace_back(version, block);
 			block = Standalone<VectorRef<uint8_t>>();
 			block.reserve(block.arena(), std::max<int64_t>(SERVER_KNOBS->TLOG_MESSAGE_BLOCK_BYTES, msgSize));
 		}
@@ -157,7 +169,7 @@ void commitMessages( LogRouterData* self, Version version, const std::vector<Tag
 			}
 
 			if (version >= tagData->popped) {
-				tagData->version_messages.push_back(std::make_pair(version, LengthPrefixedStringRef((uint32_t*)(block.end() - msg.message.size()))));
+				tagData->version_messages.emplace_back(version, LengthPrefixedStringRef((uint32_t*)(block.end() - msg.message.size())));
 				if(tagData->version_messages.back().second.expectedSize() > SERVER_KNOBS->MAX_MESSAGE_SIZE) {
 					TraceEvent(SevWarnAlways, "LargeMessage").detail("Size", tagData->version_messages.back().second.expectedSize());
 				}
@@ -166,7 +178,35 @@ void commitMessages( LogRouterData* self, Version version, const std::vector<Tag
 
 		msgSize -= msg.message.size();
 	}
-	self->messageBlocks.push_back( std::make_pair(version, block) );
+	self->messageBlocks.emplace_back(version, block);
+}
+
+ACTOR Future<Void> waitForVersion( LogRouterData *self, Version ver ) {
+	// The only time the log router should allow a gap in versions larger than MAX_READ_TRANSACTION_LIFE_VERSIONS is when processing epoch end.
+	// Since one set of log routers is created per generation of transaction logs, the gap caused by epoch end will be within MAX_VERSIONS_IN_FLIGHT of the log routers start version.
+	if(self->version.get() < self->startVersion) {
+		if(ver > self->startVersion) {
+			self->version.set(self->startVersion);
+			wait(self->minPopped.whenAtLeast(self->version.get()));
+		}
+		return Void();
+	}
+	if(!self->foundEpochEnd) {
+		wait(self->minPopped.whenAtLeast(std::min(self->version.get(), ver - SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS)));
+	} else {
+		while(self->minPopped.get() + SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS < ver) {
+			if(self->minPopped.get() + SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS > self->version.get()) {
+				self->version.set( self->minPopped.get() + SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS );
+				wait(yield(TaskPriority::TLogCommit));
+			} else {
+				wait(self->minPopped.whenAtLeast((self->minPopped.get()+1)));
+			}
+		}
+	}
+	if(ver >= self->startVersion + SERVER_KNOBS->MAX_VERSIONS_IN_FLIGHT) {
+		self->foundEpochEnd = true;
+	}
+	return Void();
 }
 
 ACTOR Future<Void> pullAsyncData( LogRouterData *self ) {
@@ -180,7 +220,7 @@ ACTOR Future<Void> pullAsyncData( LogRouterData *self ) {
 	loop {
 		loop {
 			choose {
-				when(wait( r ? r->getMore(TaskTLogCommit) : Never() ) ) {
+				when(wait( r ? r->getMore(TaskPriority::TLogCommit) : Never() ) ) {
 					break;
 				}
 				when( wait( dbInfoChange ) ) { //FIXME: does this actually happen?
@@ -203,10 +243,11 @@ ACTOR Future<Void> pullAsyncData( LogRouterData *self ) {
 			if (!foundMessage || r->version().version != ver) {
 				ASSERT(r->version().version > lastVer);
 				if (ver) {
-					wait(self->minPopped.whenAtLeast(std::min(self->version.get(), ver - SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS)));
+					wait( waitForVersion(self, ver) );
+
 					commitMessages(self, ver, messages);
 					self->version.set( ver );
-					wait(yield(TaskTLogCommit));
+					wait(yield(TaskPriority::TLogCommit));
 					//TraceEvent("LogRouterVersion").detail("Ver",ver);
 				}
 				lastVer = ver;
@@ -216,9 +257,10 @@ ACTOR Future<Void> pullAsyncData( LogRouterData *self ) {
 				if (!foundMessage) {
 					ver--; //ver is the next possible version we will get data for
 					if(ver > self->version.get()) {
-						wait(self->minPopped.whenAtLeast(std::min(self->version.get(), ver - SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS)));
+						wait( waitForVersion(self, ver) );
+
 						self->version.set( ver );
-						wait(yield(TaskTLogCommit));
+						wait(yield(TaskPriority::TLogCommit));
 					}
 					break;
 				}
@@ -228,8 +270,8 @@ ACTOR Future<Void> pullAsyncData( LogRouterData *self ) {
 			tagAndMsg.message = r->getMessageWithTags();
 			tags.clear();
 			self->logSet.getPushLocations(r->getTags(), tags, 0);
-			for(auto t : tags) {
-				tagAndMsg.tags.push_back(Tag(tagLocalityRemoteLog, t));
+			for (const auto& t : tags) {
+				tagAndMsg.tags.emplace_back(tagLocalityRemoteLog, t);
 			}
 			messages.push_back(std::move(tagAndMsg));
 
@@ -253,7 +295,7 @@ void peekMessagesFromMemory( LogRouterData* self, TLogPeekRequest const& req, Bi
 	ASSERT( !messages.getLength() );
 
 	auto& deque = get_version_messages(self, req.tag);
-	//TraceEvent("TLogPeekMem", self->dbgid).detail("Tag", printable(req.tag1)).detail("PDS", self->persistentDataSequence).detail("PDDS", self->persistentDataDurableSequence).detail("Oldest", map1.empty() ? 0 : map1.begin()->key ).detail("OldestMsgCount", map1.empty() ? 0 : map1.begin()->value.size());
+	//TraceEvent("TLogPeekMem", self->dbgid).detail("Tag", req.tag1).detail("PDS", self->persistentDataSequence).detail("PDDS", self->persistentDataDurableSequence).detail("Oldest", map1.empty() ? 0 : map1.begin()->key ).detail("OldestMsgCount", map1.empty() ? 0 : map1.begin()->value.size());
 
 	auto it = std::lower_bound(deque.begin(), deque.end(), std::make_pair(req.begin, LengthPrefixedStringRef()), CompareFirst<std::pair<Version, LengthPrefixedStringRef>>());
 
@@ -284,7 +326,7 @@ Version poppedVersion( LogRouterData* self, Tag tag) {
 ACTOR Future<Void> logRouterPeekMessages( LogRouterData* self, TLogPeekRequest req ) {
 	state BinaryWriter messages(Unversioned());
 
-	//TraceEvent("LogRouterPeek1", self->dbgid).detail("From", req.reply.getEndpoint().address).detail("Ver", self->version.get()).detail("Begin", req.begin);
+	//TraceEvent("LogRouterPeek1", self->dbgid).detail("From", req.reply.getEndpoint().getPrimaryAddress()).detail("Ver", self->version.get()).detail("Begin", req.begin);
 	if( req.returnIfBlocked && self->version.get() < req.begin ) {
 		//TraceEvent("LogRouterPeek2", self->dbgid);
 		req.reply.sendError(end_of_stream());
@@ -311,10 +353,11 @@ ACTOR Future<Void> logRouterPeekMessages( LogRouterData* self, TLogPeekRequest r
 
 	TLogPeekReply reply;
 	reply.maxKnownVersion = self->version.get();
-	reply.minKnownCommittedVersion = self->minKnownCommittedVersion;
-	reply.messages = messages.toStringRef();
+	reply.minKnownCommittedVersion = self->poppedVersion;
+	reply.messages = messages.toValue();
 	reply.popped = self->minPopped.get() >= self->startVersion ? self->minPopped.get() : 0;
 	reply.end = endVersion;
+	reply.onlySpilled = false;
 
 	req.reply.send( reply );
 	//TraceEvent("LogRouterPeek4", self->dbgid);
@@ -328,7 +371,7 @@ ACTOR Future<Void> logRouterPop( LogRouterData* self, TLogPopRequest req ) {
 	} else if (req.to > tagData->popped) {
 		tagData->popped = req.to;
 		tagData->durableKnownCommittedVersion = req.durableKnownCommittedVersion;
-		wait(tagData->eraseMessagesBefore( req.to, self, TaskTLogPop ));
+		wait(tagData->eraseMessagesBefore( req.to, self, TaskPriority::TLogPop ));
 	}
 
 	state Version minPopped = std::numeric_limits<Version>::max();
@@ -342,11 +385,13 @@ ACTOR Future<Void> logRouterPop( LogRouterData* self, TLogPopRequest req ) {
 
 	while(!self->messageBlocks.empty() && self->messageBlocks.front().first < minPopped) {
 		self->messageBlocks.pop_front();
-		wait(yield(TaskTLogPop));
+		wait(yield(TaskPriority::TLogPop));
 	}
 
+	self->poppedVersion = std::min(minKnownCommittedVersion, self->minKnownCommittedVersion);
 	if(self->logSystem->get() && self->allowPops) {
-		self->logSystem->get()->pop(std::min(minKnownCommittedVersion, self->minKnownCommittedVersion), self->routerTag);
+		const Tag popTag = self->logSystem->get()->getPseudoPopTag(self->routerTag, ProcessClass::LogRouterClass);
+		self->logSystem->get()->pop(self->poppedVersion, popTag);
 	}
 	req.reply.send(Void());
 	self->minPopped.set(std::max(minPopped, self->minPopped.get()));

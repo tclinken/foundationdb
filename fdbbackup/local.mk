@@ -26,11 +26,10 @@ fdbbackup_LIBS := lib/libfdbclient.a lib/libfdbrpc.a lib/libflow.a $(FDB_TLS_LIB
 fdbbackup_STATIC_LIBS := $(TLS_LIBS)
 
 ifeq ($(PLATFORM),linux)
-  fdbbackup_LIBS += -ldl -lpthread -lrt
-  fdbbackup_LDFLAGS += -static-libstdc++ -static-libgcc
+  fdbbackup_LDFLAGS += -static-libstdc++ -static-libgcc -ldl -lpthread -lrt
 
   # GPerfTools profiler (uncomment to use)
-  # fdbbackup_CFLAGS += -I/opt/gperftools/include -DUSE_GPERFTOOLS=1
+  # fdbbackup_CFLAGS += -I/opt/gperftools/include -DUSE_GPERFTOOLS=1 -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free
   # fdbbackup_LDFLAGS += -L/opt/gperftools/lib
   # fdbbackup_STATIC_LIBS += -ltcmalloc -lunwind -lprofiler
 else ifeq ($(PLATFORM),osx)

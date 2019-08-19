@@ -1,5 +1,4 @@
 set(FDBRPC_SRCS
-  ActorFuzz.actor.cpp
   AsyncFileCached.actor.h
   AsyncFileEIO.actor.h
   AsyncFileKAIO.actor.h
@@ -11,9 +10,7 @@ set(FDBRPC_SRCS
   AsyncFileWriteChecker.cpp
   batcher.actor.h
   crc32c.cpp
-  dsltest.actor.cpp
   FailureMonitor.actor.cpp
-  FlowTests.actor.cpp
   FlowTransport.actor.cpp
   genericactors.actor.h
   genericactors.actor.cpp
@@ -29,13 +26,13 @@ set(FDBRPC_SRCS
   ReplicationUtils.cpp
   sim2.actor.cpp
   sim_validation.cpp
+  TimedRequest.h
   TLSConnection.actor.cpp
-  TraceFileIO.cpp
-  # C files
+  TraceFileIO.cpp)
+
+set(FDBRPC_THIRD_PARTY_SRCS
   libcoroutine/Common.c
-  libcoroutine/context.c
   libcoroutine/Coro.c
-  libeio/eio.c
   zlib/adler32.c
   zlib/crc32.c
   zlib/deflate.c
@@ -51,11 +48,28 @@ set(FDBRPC_SRCS
   zlib/zutil.c)
 
 if(APPLE)
-  list(APPEND FDBRPC_SRCS libcoroutine/asm.S libcoroutine/context.c)
+  list(APPEND FDBRPC_THIRD_PARTY_SRCS libcoroutine/asm.S)
+endif()
+if(NOT WIN32)
+  list(APPEND FDBRPC_THIRD_PARTY_SRCS libcoroutine/context.c libeio/eio.c)
 endif()
 
-actor_set(FDBRPC_BUILD "${FDBRPC_SRCS}")
-add_library(fdbrpc STATIC ${FDBRPC_BUILD})
-actor_compile(fdbrpc "${FDBRPC_SRCS}")
+add_library(thirdparty ${FDBRPC_THIRD_PARTY_SRCS})
+if(NOT WIN32)
+  target_compile_options(thirdparty BEFORE PRIVATE -w) # disable warnings for third party
+endif()
+if(USE_VALGRIND)
+  target_link_libraries(thirdparty PUBLIC Valgrind)
+endif()
+
+set(FDBRPC_SRCS_DISABLE_ACTOR_DIAGNOSTICS
+  ActorFuzz.actor.cpp
+  FlowTests.actor.cpp
+  dsltest.actor.cpp)
+
+add_flow_target(STATIC_LIBRARY NAME fdbrpc
+  SRCS ${FDBRPC_SRCS}
+  DISABLE_ACTOR_DIAGNOSTICS ${FDBRPC_SRCS_DISABLE_ACTOR_DIAGNOSTICS})
 target_include_directories(fdbrpc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libeio)
+target_link_libraries(fdbrpc PRIVATE thirdparty)
 target_link_libraries(fdbrpc PUBLIC flow)

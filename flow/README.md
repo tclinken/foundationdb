@@ -91,7 +91,7 @@ int count = wait( f );
 printf( "%d\n", count );
 ```
 
-It is worth nothing that, although the function `wait()` is declared in actorcompiler.h, this
+It is worth nothing that, although the function `wait()` is declared in [actorcompiler.h](actorcompiler.h), this
 “function” is compiled by the Actor Compiler into a complex set of integrated statements and
 callbacks. It is therefore never present in generated code or at link time.
 **Note** : because of the way that the actor compiler is built, `wait()` must always assign the
@@ -101,7 +101,7 @@ From 6.1, `wait()` on `Void` actors shouldn't assign the resulting value. So, th
 
 ```c++
 Future<Void> asyncTask(); //defined elsewhere
-Void _ = wait(asyncTask());
+Void _ = _wait(asyncTask());
 ```
 
 becomes
@@ -162,7 +162,7 @@ ACTOR Future<Void> asyncCalculation(Future<int> f, Promise<int> p, int offset ) 
 
 ### PromiseStream<>, FutureStream<>
 
-PromiseStream ​and `FutureStream `are groupings of a series of asynchronous messages.
+PromiseStream ​and `FutureStream` are groupings of a series of asynchronous messages.
 
 
 These allow for two important features: multiplexing and network reliability, discussed later.
@@ -171,7 +171,7 @@ They can be waited on with the `waitNext()` function.
 ### waitNext()
 
 Like `wait()`, `waitNext()` pauses program execution and awaits the next value in a
-FutureStream. If there is a value ready in the stream, execution continues without delay. The
+`FutureStream`. If there is a value ready in the stream, execution continues without delay. The
 following “server” waits on input, send an output to a `PromiseStream`:
 
 ```c++
@@ -295,6 +295,122 @@ construct that is analogous to sending someone a self-addressed envelope. You se
 promise to a someone else, who then unpacks it and send the answer back to you, because
 you are holding the corresponding future.
 
+### Flatbuffers/ObjectSerializer
+
+1. Introduction
+
+    The goal is to have a more robust serialization protocol.  One feature of
+    flatbuffers is that you can add a new field to a network message without
+    requiring a protocol-incompatible upgrade. In order for this to work,
+    correctness must not depend on that field always being present. This can be
+    tested in simulation by randomly (use buggify) default-initializing that
+    field when deserializing. Once you make a protocol-incompatible upgrade you
+    can rely on the field always being present in the new protocol, just like
+    before. Currently we are using a custom flatbuffers implementation so to
+    that we can present (roughly) the same serialization api as before.
+    Currently the ObjectSerializer is only used for network messages, but that
+    may change.  Flatbuffers was selected because it is (relatively) simple
+    among protocols providing forwards/backwards compatibility, and its binary
+    format is [well
+    documented](https://github.com/dvidelabs/flatcc/blob/master/doc/binary-format.md)
+
+1. Correspondence to flatbuffers IDL
+    - Tables
+    ```
+    // Flow type
+    struct A {
+        constexpr static FileIdentifier file_identifier = 12345;
+        int a;
+        template <class Ar>
+        void serialize(Ar& ar) {
+            serializer(ar, a);
+        }
+    }
+
+    // IDL equivalent
+    table A {
+        a:int;
+    }
+    ```
+    - Unions
+    ```
+    // Flow type
+    using T = boost::variant<A, B, C>;
+
+    // IDL equivalent
+    union T { A, B, C}
+    ```
+    - Strings (there's a string type in the idl that guarantees null termination, but flow does not, so it's comparable to a vector of bytes)
+    ```
+    // Flow type
+    StringRef, std::string
+
+    // IDL equivalent
+    [ubyte]
+    ```
+    - Vectors
+    ```
+    // Flow type
+    VectorRef<T>, std::vector<T>
+
+    // IDL equivalent
+    [T]
+    ```
+
+1. Flatbuffers Traits
+
+    In order to serialize a type as a flatbuffers vector, struct, or union, you can implement the appropriate trait for your type.
+    - `scalar_traits` corresponds to a flatbuffers struct. See `UID` for an example.
+    - `vector_like_traits` corresponds to a flatbuffers vector. See `VectorRef` for an example.
+    - `dynamic_size_traits` corresponds to a flatbuffers vector of uint8_t. See `StringRef` for an example.
+    - `union_like_traits` corresponds to a flatbuffers union. See `boost::variant` for an example.
+
+1. Potential Gotchas
+    - Flatbuffers 'vtables' are collected from default-constructed instances of
+      each type. Consequently types serialized by flatbuffers should have cheap
+      default constructors. Future work: we may be able to collect vtables
+      without an instance of a type using `declval`.
+
+    - `T::serialize` may get called multiple times when serializing `T`. It is
+      guaranteed to be called only once for deserialization though, and thus
+      the `Ar::isDeserializing` idiom is appropriate. Future work: in theory we
+      don't need to call `T::serialize` multiple times when serializing, but
+      this would complicate the implementation.
+
+   - In a call to `serializer`, arenas must come after any members whose memory
+     the arena owns. It's safe to reorder an arena in a `serializer` call
+     because arenas are ignored for the flatbuffers schema. (Future work)
+     Enforce that no fields appear after an arena at compile time.
+
+1. File identifiers
+
+    [File identifiers](https://google.github.io/flatbuffers/md__schemas.html)
+    are used to sanity check that the message you're deserializing is of the
+    schema you expect. You can give a type `T` a file identifier by making
+    `T::file_identifier` a static member of type `FileIdentifier`. If you don't
+    control `T`, you can specialize the `FileIdentifierFor` template. See
+    `flow/FileIdentifier.h` for examples. You don't need to change the file
+    identifier for a type when evolving its schema.
+
+1. Schema evolution
+
+    Two schemas are forward/backward compatible if they meet the following
+    requirements. (Future work) Any fields that are not common to both schemas should be
+    default-initialized in deserialized messages. Currently they will be
+    uninitialized if their default constructor doesn't initialize.
+
+    - Two tables are compatible if one table's fields are all compatible with a prefix of the other table's fields.
+    - Two vectors are compatible if their element types are compatible.
+    - Two unions are compatible if one union's fields are all compatible with a prefix of the other union's fields.
+    - Two scalar types are only compatible if they are equal.
+
+1. Deprecation
+
+    Flatbuffers allows fields to be deprecated, and a deprecated field consumes
+    only two bytes on the wire. (Future work) Introduce `Deprecated<...>`
+    template or something similar so that we can write smaller messages for
+    deprecated fields.
+
 ### ACTOR return values
 
 An actor can have only one returned Future, so there is a case that one actor wants to perform
@@ -303,7 +419,7 @@ some operation more than once:
 ```c++
 ACTOR Future<Void> periodically(PromiseStream<Void> ps, int seconds) {
     loop {
-        Void _ = wait( delay( seconds ) );
+        wait( delay( seconds ) );
         ps.send(Void());
     }
 }
@@ -311,6 +427,9 @@ ACTOR Future<Void> periodically(PromiseStream<Void> ps, int seconds) {
 
 In this example, the `PromiseStream `is actually a way for the actor to return data from some
 operation that it ongoing.
+
+By default it is a compiler error to discard the result of a cancellable actor. If you don't think this is appropriate for your actor you can use the `[[flow_allow_discard]]` attribute.
+This does not apply to UNCANCELLABLE actors.
 
 ## “gotchas”
 
@@ -341,7 +460,7 @@ this exception should not be caught, though there are cetainly exceptions!
 
 The FoundationDB solution uses reference counting to manage the lifetimes of many of its
 constituent classes. In order for a class `T` to be reference counted, the following two globally
-defined methods must be defined (see `FastRef.h`):
+defined methods must be defined (see [FastRef.h](FastRef.h)):
 
 
 ```c++
@@ -352,28 +471,28 @@ void delref(T*);
 The easiest way to implement these methods is by making your class a descendant of
 `ReferenceCounted`.
 
-NOTE: Any descendants of `ReferenceCounted `should either have virtual destructors or be
+NOTE: Any descendants of `ReferenceCounted` should either have virtual destructors or be
 sealed. If you fail to meet these criteria, then references to descendants of your class will never
 be deleted.
 
 If you choose not to inherit from `ReferenceCounted`, you will have to manage the reference
 count yourself. One way this can be done is to define `void addref()` and `void delref()`
-methods on your class, which will make it compatible with the existing global `addref `and
-`delref` methods. Otherwise, you will need to create the global `addref `and `delref `methods
+methods on your class, which will make it compatible with the existing global `addref` and
+`delref` methods. Otherwise, you will need to create the global `addref` and `delref` methods
 for your class, as mentioned above. In either case, you will need to manage the reference
 count on your object and delete it when the count reaches 0. Note that the reference count
 should usually be initialized to 1, as the `addRef(T*)` function is not called when the object is
 created.
 
 To create a reference counted instance of a class `T`, you instantiate a `Reference<T>` on the
-stack with a pointer to your `T `object:
+stack with a pointer to your `T` object:
 
 ```c++
 Reference<T> refCountedInstance(new T());
 ```
 The `Reference<T>` class automatically calls addref on your `T` instance every time it is copied
 (such as by argument passing or assignment), but not when the object is initially created
-(consequently, `ReferenceCounted `classes are initialized with reference count 1). It will call
+(consequently, `ReferenceCounted` classes are initialized with reference count 1). It will call
 `delref` on your `T` instance whenever a particular `Reference<T>` instance gets deleted (usually
 by going out of scope). When no more instances of `Reference<T>` holding a particular `T`
 instance exist, then that `T` instance will be destroyed.
@@ -391,7 +510,7 @@ their reference counts will never reach 0 and the objects will never be deleted.
 
 In addition to using reference counting, the FoundationDB solution also uses memory pools to
 allocate buffers. In this scheme, buffers are allocated from a common pool, called an `Arena`,
-and remain valid for the entire lifetime of that `Arena`. When the `Arena `is destroyed, all of the
+and remain valid for the entire lifetime of that `Arena`. When the `Arena` is destroyed, all of the
 memory it held for the buffers is deallocated along with it. As a general convention, types which
 can use these `Arenas` and do not manage their own memory are given the "`Ref`" suffix. When
 a `*Ref` object is being used, consideration should be given to how its buffers are being
@@ -494,7 +613,7 @@ ACTOR Future<void> foo(StringRef param)
 ACTOR Future<Void> bar()
 {
     Standalone<StringRef> str("string");
-    Void _ = wait(foo(str));
+    wait(foo(str));
     return Void();
 }
 ```

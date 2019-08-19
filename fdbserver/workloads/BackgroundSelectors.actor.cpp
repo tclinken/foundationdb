@@ -19,13 +19,13 @@
  */
 
 #include "fdbrpc/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 KeySelector randomizedSelector(const KeyRef &key, bool orEqual, int offset ) {
-	if( orEqual && g_random->random01() > 0.5 )
+	if( orEqual && deterministicRandom()->random01() > 0.5 )
 		return KeySelectorRef( keyAfter(key), false, offset );
 	return KeySelectorRef( key, orEqual, offset );
 }
@@ -101,26 +101,33 @@ struct BackgroundSelectorWorkload : TestWorkload {
 		state bool restartProcess;
 
 		loop {
-			forward = g_random->randomInt(0,2) != 0;
+			forward = deterministicRandom()->randomInt(0,2) != 0;
 			direction = forward ? 1 : -1;
-			diff = g_random->randomInt(0, self->maxDiff);
+			diff = deterministicRandom()->randomInt(0, self->maxDiff);
 
 			//Setup start and end key
 			loop {
 				try {
 					if( forward ) {
-						Standalone<StringRef> res = wait( tr.getKey( KeySelectorRef( allKeys.begin, false, 1 ) ) );
-						startKey = res;
+						{
+							Standalone<StringRef> res = wait( tr.getKey( KeySelectorRef( allKeys.begin, false, 1 ) ) );
+							startKey = res;
+						}
 
-						Standalone<StringRef> res = wait( tr.getKey( randomizedSelector( startKey, true, diff) ) );
-						endKey = res;
-					}
-					else {
-						Standalone<StringRef> res = wait( tr.getKey( KeySelectorRef( allKeys.end, false, 0 ) ) );
-						endKey = res;
+						{
+							Standalone<StringRef> res = wait( tr.getKey( randomizedSelector( startKey, true, diff) ) );
+							endKey = res;
+						}
+					} else {
+						{
+							Standalone<StringRef> res = wait( tr.getKey( KeySelectorRef( allKeys.end, false, 0 ) ) );
+							endKey = res;
+						}
 
-						Standalone<StringRef> res = wait( tr.getKey( randomizedSelector( endKey, true, -1 * diff) ) );
-						startKey = res;
+						{
+							Standalone<StringRef> res = wait( tr.getKey( randomizedSelector( endKey, true, -1 * diff) ) );
+							startKey = res;
+						}
 					}
 					break;
 				} catch( Error &e ) {
@@ -131,8 +138,8 @@ struct BackgroundSelectorWorkload : TestWorkload {
 			loop {
 				wait( poisson( &lastTime, 1.0 / self->transactionsPerSecond ) );
 				tr.reset();
-				startDrift = direction * g_random->randomInt( self->minDrift, self->maxDrift );
-				endDrift   = direction * g_random->randomInt( self->minDrift, self->maxDrift );
+				startDrift = direction * deterministicRandom()->randomInt( self->minDrift, self->maxDrift );
+				endDrift   = direction * deterministicRandom()->randomInt( self->minDrift, self->maxDrift );
 
 				//max sure the end drift does not violate maxDiff
 				endDrift = std::max( endDrift, startDrift - self->maxDiff - diff );
@@ -147,20 +154,20 @@ struct BackgroundSelectorWorkload : TestWorkload {
 				loop {
 					try {
 						if( diff < 0 ) {
-							Standalone<RangeResultRef> res = wait( tr.getRange( randomizedSelector(endKey, true, endDrift), randomizedSelector(startKey, true, startDrift + 1), self->resultLimit ) );
-							rangeResult = res;
-							Standalone<StringRef> res = wait( tr.getKey( randomizedSelector(startKey, true, startDrift) ) );
-							endResult = res;
-							Standalone<StringRef> res = wait( tr.getKey( randomizedSelector(endKey, true, endDrift) ) );
-							startResult = res;
+							Standalone<RangeResultRef> rangeResult_ = wait( tr.getRange( randomizedSelector(endKey, true, endDrift), randomizedSelector(startKey, true, startDrift + 1), self->resultLimit ) );
+							rangeResult = rangeResult_;
+							Standalone<StringRef> endResult_ = wait( tr.getKey( randomizedSelector(startKey, true, startDrift) ) );
+							endResult = endResult_;
+							Standalone<StringRef> startResult_ = wait( tr.getKey( randomizedSelector(endKey, true, endDrift) ) );
+							startResult = startResult_;
 						}
 						else {
-							Standalone<RangeResultRef> res = wait( tr.getRange( randomizedSelector(startKey, true, startDrift), randomizedSelector(endKey, true, endDrift + 1), self->resultLimit ) );
-							rangeResult = res;
-							Standalone<StringRef> res = wait( tr.getKey( randomizedSelector(startKey, true, startDrift) ) );
-							startResult = res;
-							Standalone<StringRef> res = wait( tr.getKey( randomizedSelector(endKey, true, endDrift) ) );
-							endResult = res;
+							Standalone<RangeResultRef> rangeResult_ = wait( tr.getRange( randomizedSelector(startKey, true, startDrift), randomizedSelector(endKey, true, endDrift + 1), self->resultLimit ) );
+							rangeResult = rangeResult_;
+							Standalone<StringRef> startResult_ = wait( tr.getKey( randomizedSelector(startKey, true, startDrift) ) );
+							startResult = startResult_;
+							Standalone<StringRef> endResult_ = wait( tr.getKey( randomizedSelector(endKey, true, endDrift) ) );
+							endResult = endResult_;
 						}
 
 						restartProcess = false;

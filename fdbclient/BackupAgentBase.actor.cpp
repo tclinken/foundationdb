@@ -18,9 +18,81 @@
  * limitations under the License.
  */
 
-#include "fdbclient/BackupAgent.h"
+#include <iomanip>
+#include <time.h>
+
+#include "fdbclient/BackupAgent.actor.h"
 #include "fdbrpc/simulator.h"
 #include "flow/ActorCollection.h"
+#include "flow/actorcompiler.h" // has to be last include
+
+std::string BackupAgentBase::formatTime(int64_t epochs) {
+	time_t curTime = (time_t)epochs;
+	char buffer[30];
+	struct tm timeinfo;
+	getLocalTime(&curTime, &timeinfo);
+	strftime(buffer, 30, "%Y/%m/%d.%H:%M:%S%z", &timeinfo);
+	return buffer;
+}
+
+int64_t BackupAgentBase::parseTime(std::string timestamp) {
+	struct tm out;
+	out.tm_isdst = -1; // This field is not set by strptime. -1 tells mktime to determine whether DST is in effect
+
+	std::string timeOnly = timestamp.substr(0, 19);
+
+	// TODO:  Use std::get_time implementation for all platforms once supported
+	// It would be nice to read the timezone using %z, but it seems not all get_time()
+	// or strptime() implementations handle it correctly in all environments so we
+	// will read the date and time independent of timezone at first and then adjust it.
+#ifdef _WIN32
+	std::istringstream s(timeOnly);
+	s.imbue(std::locale(setlocale(LC_TIME, nullptr)));
+	s >> std::get_time(&out, "%Y/%m/%d.%H:%M:%S");
+	if (s.fail()) {
+		return -1;
+	}
+#else
+	if(strptime(timeOnly.c_str(), "%Y/%m/%d.%H:%M:%S", &out) == nullptr) {
+		return -1;
+	}
+#endif
+
+	// Read timezone offset in +/-HHMM format then convert to seconds
+	int tzHH;
+	int tzMM;
+	if(sscanf(timestamp.substr(19, 5).c_str(), "%3d%2d", &tzHH, &tzMM) != 2) {
+		return -1;
+	}
+	if(tzHH < 0) {
+		tzMM = -tzMM;
+	}
+	// tzOffset is the number of seconds EAST of GMT
+	int tzOffset = tzHH * 60 * 60 + tzMM * 60;
+
+	// The goal is to convert the timestamp string to epoch seconds assuming the date/time was expressed in the timezone at the end of the string.
+	// However, mktime() will ONLY return epoch seconds assuming the date/time is expressed in local time (based on locale / environment)
+	// mktime() will set out.tm_gmtoff when available
+	int64_t ts = mktime(&out);
+
+	// localTZOffset is the number of seconds EAST of GMT
+	long localTZOffset;
+#ifdef _WIN32
+	// _get_timezone() returns the number of seconds WEST of GMT
+	if(_get_timezone(&localTZOffset) != 0) {
+		return -1;
+	}
+	// Negate offset to match the orientation of tzOffset
+	localTZOffset = -localTZOffset;
+#else
+	// tm.tm_gmtoff is the number of seconds EAST of GMT
+	localTZOffset = out.tm_gmtoff;
+#endif
+
+	// Add back the difference between the local timezone assumed by mktime() and the intended timezone from the input string
+	ts += (localTZOffset - tzOffset);
+	return ts;
+}
 
 const Key BackupAgentBase::keyFolderId = LiteralStringRef("config_folderid");
 const Key BackupAgentBase::keyBeginVersion = LiteralStringRef("beginVersion");
@@ -77,7 +149,7 @@ Standalone<VectorRef<KeyRangeRef>> getLogRanges(Version beginVersion, Version en
 
 	Key baLogRangePrefix = destUidValue.withPrefix(backupLogKeys.begin);
 
-	//TraceEvent("GetLogRanges").detail("DestUidValue", destUidValue).detail("Prefix", printable(StringRef(baLogRangePrefix)));
+	//TraceEvent("GetLogRanges").detail("DestUidValue", destUidValue).detail("Prefix", baLogRangePrefix);
 
 	for (int64_t vblock = beginVersion / blockSize; vblock < (endVersion + blockSize - 1) / blockSize; ++vblock) {
 		int64_t tb = vblock * blockSize / CLIENT_KNOBS->LOG_RANGE_BLOCK_SIZE;
@@ -100,7 +172,7 @@ Standalone<VectorRef<KeyRangeRef>> getApplyRanges(Version beginVersion, Version 
 
 	Key baLogRangePrefix = backupUid.withPrefix(applyLogKeys.begin);
 
-	//TraceEvent("GetLogRanges").detail("BackupUid", backupUid).detail("Prefix", printable(StringRef(baLogRangePrefix)));
+	//TraceEvent("GetLogRanges").detail("BackupUid", backupUid).detail("Prefix", baLogRangePrefix);
 
 	for (int64_t vblock = beginVersion / CLIENT_KNOBS->APPLY_BLOCK_SIZE; vblock < (endVersion + CLIENT_KNOBS->APPLY_BLOCK_SIZE - 1) / CLIENT_KNOBS->APPLY_BLOCK_SIZE; ++vblock) {
 		int64_t tb = vblock * CLIENT_KNOBS->APPLY_BLOCK_SIZE / CLIENT_KNOBS->LOG_RANGE_BLOCK_SIZE;
@@ -149,7 +221,7 @@ Standalone<VectorRef<MutationRef>> decodeBackupLogValue(StringRef value) {
 		offset += sizeof(uint64_t);
 		if (protocolVersion <= 0x0FDB00A200090001){
 			TraceEvent(SevError, "DecodeBackupLogValue").detail("IncompatibleProtocolVersion", protocolVersion)
-				.detail("ValueSize", value.size()).detail("Value", printable(value));
+				.detail("ValueSize", value.size()).detail("Value", value);
 			throw incompatible_protocol_version();
 		}
 
@@ -195,7 +267,7 @@ Standalone<VectorRef<MutationRef>> decodeBackupLogValue(StringRef value) {
 		return result;
 	}
 	catch (Error& e) {
-		TraceEvent(e.code() == error_code_restore_missing_data ? SevWarn : SevError, "BA_DecodeBackupLogValue").error(e).GetLastError().detail("ValueSize", value.size()).detail("Value", printable(value));
+		TraceEvent(e.code() == error_code_restore_missing_data ? SevWarn : SevError, "BA_DecodeBackupLogValue").error(e).GetLastError().detail("ValueSize", value.size()).detail("Value", value);
 		throw;
 	}
 }
@@ -208,7 +280,7 @@ void decodeBackupLogValue(Arena& arena, VectorRef<MutationRef>& result, int& mut
 		offset += sizeof(uint64_t);
 		if (protocolVersion <= 0x0FDB00A200090001){
 			TraceEvent(SevError, "DecodeBackupLogValue").detail("IncompatibleProtocolVersion", protocolVersion)
-				.detail("ValueSize", value.size()).detail("Value", printable(value));
+				.detail("ValueSize", value.size()).detail("Value", value);
 			throw incompatible_protocol_version();
 		}
 
@@ -303,7 +375,7 @@ void decodeBackupLogValue(Arena& arena, VectorRef<MutationRef>& result, int& mut
 		}
 	}
 	catch (Error& e) {
-		TraceEvent(e.code() == error_code_restore_missing_data ? SevWarn : SevError, "BA_DecodeBackupLogValue").error(e).GetLastError().detail("ValueSize", value.size()).detail("Value", printable(value));
+		TraceEvent(e.code() == error_code_restore_missing_data ? SevWarn : SevError, "BA_DecodeBackupLogValue").error(e).GetLastError().detail("ValueSize", value.size()).detail("Value", value);
 		throw;
 	}
 }
@@ -312,7 +384,7 @@ void logErrorWorker(Reference<ReadYourWritesTransaction> tr, Key keyErrors, std:
 	tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 	tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 	if(now() - lastErrorTime > CLIENT_KNOBS->BACKUP_ERROR_DELAY) {
-		TraceEvent("BA_LogError").detail("Key", printable(keyErrors)).detail("Message", message);
+		TraceEvent("BA_LogError").detail("Key", keyErrors).detail("Message", message);
 		lastErrorTime = now();
 	}
 	tr->set(keyErrors, message);
@@ -347,7 +419,7 @@ ACTOR Future<Void> readCommitted(Database cx, PromiseStream<RangeResultWithVersi
 
 			//add lock
 			releaser.release();
-			wait(lock->take(TaskDefaultYield, limits.bytes + CLIENT_KNOBS->VALUE_SIZE_LIMIT + CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT));
+			wait(lock->take(TaskPriority::DefaultYield, limits.bytes + CLIENT_KNOBS->VALUE_SIZE_LIMIT + CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT));
 			releaser = FlowLock::Releaser(*lock, limits.bytes + CLIENT_KNOBS->VALUE_SIZE_LIMIT + CLIENT_KNOBS->SYSTEM_KEY_SIZE_LIMIT);
 
 			state Standalone<RangeResultRef> values = wait(tr.getRange(begin, end, limits));
@@ -357,7 +429,7 @@ ACTOR Future<Void> readCommitted(Database cx, PromiseStream<RangeResultWithVersi
 				values.resize(values.arena(), values.size() / 2);
 				values.more = true;
 				// Half of the time wait for this tr to expire so that the next read is at a different version
-				if(g_random->random01() < 0.5)
+				if(deterministicRandom()->random01() < 0.5)
 					wait(delay(6.0));
 			}
 
@@ -376,9 +448,14 @@ ACTOR Future<Void> readCommitted(Database cx, PromiseStream<RangeResultWithVersi
 			}
 		}
 		catch (Error &e) {
-			if (e.code() != error_code_transaction_too_old && e.code() != error_code_future_version)
-				throw;
-			tr = Transaction(cx);
+			if (e.code() == error_code_transaction_too_old) {
+				// We are using this transaction until it's too old and then resetting to a fresh one,
+				// so we don't need to delay.
+				tr.fullReset();
+			}
+			else {
+				wait(tr.onError(e));
+			}
 		}
 	}
 }
@@ -411,20 +488,19 @@ ACTOR Future<Void> readCommitted(Database cx, PromiseStream<RCGroup> results, Fu
 				rangevalue.resize(rangevalue.arena(), rangevalue.size() / 2);
 				rangevalue.more = true;
 				// Half of the time wait for this tr to expire so that the next read is at a different version
-				if(g_random->random01() < 0.5)
+				if(deterministicRandom()->random01() < 0.5)
 					wait(delay(6.0));
 			}
 
 			//add lock
 			wait(active);
 			releaser.release();
-			wait(lock->take(TaskDefaultYield, rangevalue.expectedSize() + rcGroup.items.expectedSize()));
+			wait(lock->take(TaskPriority::DefaultYield, rangevalue.expectedSize() + rcGroup.items.expectedSize()));
 			releaser = FlowLock::Releaser(*lock, rangevalue.expectedSize() + rcGroup.items.expectedSize());
 
-			int index(0);
 			for (auto & s : rangevalue){
 				uint64_t groupKey = groupBy(s.key).first;
-				//TraceEvent("Log_ReadCommitted").detail("GroupKey", groupKey).detail("SkipGroup", skipGroup).detail("NextKey", printable(nextKey.key)).detail("End", printable(end.key)).detail("Valuesize", value.size()).detail("Index",index++).detail("Size",s.value.size());
+				//TraceEvent("Log_ReadCommitted").detail("GroupKey", groupKey).detail("SkipGroup", skipGroup).detail("NextKey", nextKey.key).detail("End", end.key).detail("Valuesize", value.size()).detail("Index",index++).detail("Size",s.value.size());
 				if (groupKey != skipGroup){
 					if (rcGroup.version == -1){
 						rcGroup.version = tr.getReadVersion().get();
@@ -467,9 +543,14 @@ ACTOR Future<Void> readCommitted(Database cx, PromiseStream<RCGroup> results, Fu
 			nextKey = firstGreaterThan(rangevalue.end()[-1].key);
 		}
 		catch (Error &e) {
-			if (e.code() != error_code_transaction_too_old && e.code() != error_code_future_version)
-				throw;
-			wait(tr.onError(e));
+			if (e.code() == error_code_transaction_too_old) {
+				// We are using this transaction until it's too old and then resetting to a fresh one,
+				// so we don't need to delay.
+				tr.fullReset();
+			}
+			else {
+				wait(tr.onError(e));
+			}
 		}
 	}
 }
@@ -496,7 +577,7 @@ ACTOR Future<int> dumpData(Database cx, PromiseStream<RCGroup> results, Referenc
 				for(int i = 0; i < group.items.size(); ++i) {
 					bw.serializeBytes(group.items[i].value);
 				}
-				decodeBackupLogValue(req.arena, req.transaction.mutations, mutationSize, bw.toStringRef(), addPrefix, removePrefix, group.groupKey, keyVersion);
+				decodeBackupLogValue(req.arena, req.transaction.mutations, mutationSize, bw.toValue(), addPrefix, removePrefix, group.groupKey, keyVersion);
 				newBeginVersion = group.groupKey + 1;
 				if(mutationSize >= CLIENT_KNOBS->BACKUP_LOG_WRITE_BATCH_MAX_SIZE) {
 					break;
@@ -532,7 +613,7 @@ ACTOR Future<int> dumpData(Database cx, PromiseStream<RCGroup> results, Referenc
 		req.flags = req.flags | CommitTransactionRequest::FLAG_IS_LOCK_AWARE;
 
 		totalBytes += mutationSize;
-		wait( commitLock->take(TaskDefaultYield, mutationSize) );
+		wait( commitLock->take(TaskPriority::DefaultYield, mutationSize) );
 		addActor.send( commitLock->releaseWhen( success(commit.getReply(req)), mutationSize ) );
 
 		if(endOfStream) {
@@ -572,7 +653,7 @@ ACTOR Future<Void> coalesceKeyVersionCache(Key uid, Version endVersion, Referenc
 		req.transaction.read_snapshot = committedVersion->get();
 		req.flags = req.flags | CommitTransactionRequest::FLAG_IS_LOCK_AWARE;
 
-		wait( commitLock->take(TaskDefaultYield, mutationSize) );
+		wait( commitLock->take(TaskPriority::DefaultYield, mutationSize) );
 		addActor.send( commitLock->releaseWhen( success(commit.getReply(req)), mutationSize ) );
 	}
 
@@ -585,10 +666,12 @@ ACTOR Future<Void> applyMutations(Database cx, Key uid, Key addPrefix, Key remov
 	state Future<Void> error = actorCollection( addActor.getFuture() );
 	state int maxBytes = CLIENT_KNOBS->APPLY_MIN_LOCK_BYTES;
 
+	keyVersion->insert(metadataVersionKey, 0);
+
 	try {
 		loop {
 			if(beginVersion >= *endVersion) {
-				wait( commitLock.take(TaskDefaultYield, CLIENT_KNOBS->BACKUP_LOCK_BYTES) );
+				wait( commitLock.take(TaskPriority::DefaultYield, CLIENT_KNOBS->BACKUP_LOCK_BYTES) );
 				commitLock.release(CLIENT_KNOBS->BACKUP_LOCK_BYTES);
 				if(beginVersion >= *endVersion) {
 					return Void();

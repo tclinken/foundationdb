@@ -19,9 +19,9 @@
  */
 
 #include "fdbrpc/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
@@ -116,7 +116,7 @@ struct StreamingReadWorkload : TestWorkload {
 				loop {
 					try {
 						if(!self->readSequentially)
-							currentIndex = g_random->randomInt( 0, self->nodeCount - thisRangeSize );
+							currentIndex = deterministicRandom()->randomInt( 0, self->nodeCount - thisRangeSize );
 						else if(currentIndex > maxIndex - thisRangeSize)
 							currentIndex = minIndex;
 

@@ -41,8 +41,23 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 
 	class ReadSnapshot implements ReadTransaction {
 		@Override
+		public boolean isSnapshot() {
+			return true;
+		}
+
+		@Override
+		public ReadTransaction snapshot() {
+			return this;
+		}
+
+		@Override
 		public CompletableFuture<Long> getReadVersion() {
 			return FDBTransaction.this.getReadVersion();
+		}
+
+		@Override
+		public void setReadVersion(long version) {
+			FDBTransaction.this.setReadVersion(version);
 		}
 
 		@Override
@@ -127,6 +142,18 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 		}
 
 		@Override
+		public boolean addReadConflictRangeIfNotSnapshot(byte[] keyBegin, byte[] keyEnd) {
+			// This is a snapshot transaction; do not add the conflict range.
+			return false;
+		}
+
+		@Override
+		public boolean addReadConflictKeyIfNotSnapshot(byte[] key) {
+			// This is a snapshot transaction; do not add the conflict key.
+			return false;
+		}
+
+		@Override
 		public TransactionOptions options() {
 			return FDBTransaction.this.options();
 		}
@@ -158,6 +185,11 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	}
 
 	@Override
+	public boolean isSnapshot() {
+		return false;
+	}
+
+	@Override
 	public ReadTransaction snapshot() {
 		return snapshot;
 	}
@@ -184,7 +216,7 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	public CompletableFuture<Long> getReadVersion() {
 		pointerReadLock.lock();
 		try {
-			return new FutureVersion(Transaction_getReadVersion(getPtr()), executor);
+			return new FutureInt64(Transaction_getReadVersion(getPtr()), executor);
 		} finally {
 			pointerReadLock.unlock();
 		}
@@ -322,8 +354,20 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	}
 
 	@Override
+	public boolean addReadConflictRangeIfNotSnapshot(byte[] keyBegin, byte[] keyEnd) {
+		addReadConflictRange(keyBegin, keyEnd);
+		return true;
+	}
+
+	@Override
 	public void addReadConflictRange(byte[] keyBegin, byte[] keyEnd) {
 		addConflictRange(keyBegin, keyEnd, ConflictRangeType.READ);
+	}
+
+	@Override
+	public boolean addReadConflictKeyIfNotSnapshot(byte[] key) {
+		addReadConflictKey(key);
+		return true;
 	}
 
 	@Override
@@ -471,6 +515,16 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	}
 
 	@Override
+	public CompletableFuture<Long> getApproximateSize() {
+		pointerReadLock.lock();
+		try {
+			return new FutureInt64(Transaction_getApproximateSize(getPtr()), executor);
+		} finally {
+			pointerReadLock.unlock();
+		}
+	}
+
+	@Override
 	public CompletableFuture<Void> watch(byte[] key) throws FDBException {
 		pointerReadLock.lock();
 		try {
@@ -598,6 +652,7 @@ class FDBTransaction extends NativeObjectWrapper implements Transaction, OptionC
 	private native long Transaction_commit(long cPtr);
 	private native long Transaction_getCommittedVersion(long cPtr);
 	private native long Transaction_getVersionstamp(long cPtr);
+	private native long Transaction_getApproximateSize(long cPtr);
 	private native long Transaction_onError(long cPtr, int errorCode);
 	private native void Transaction_dispose(long cPtr);
 	private native void Transaction_reset(long cPtr);

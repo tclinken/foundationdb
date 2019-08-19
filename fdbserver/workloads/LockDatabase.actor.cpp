@@ -18,10 +18,10 @@
  * limitations under the License.
  */
 
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
-#include "fdbclient/ManagementAPI.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
+#include "fdbclient/ManagementAPI.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 struct LockDatabaseWorkload : TestWorkload {
@@ -116,7 +116,7 @@ struct LockDatabaseWorkload : TestWorkload {
 	}
 
 	ACTOR static Future<Void> lockWorker( Database cx, LockDatabaseWorkload* self ) {
-		state UID lockID = g_random->randomUniqueID();
+		state UID lockID = deterministicRandom()->randomUniqueID();
 		wait(delay(self->lockAfter));
 		state Standalone<RangeResultRef> data = wait(lockAndSave(cx, self, lockID));
 		state Future<Void> checker = checkLocked(cx, self);

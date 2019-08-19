@@ -24,6 +24,7 @@
 #include "flow/Platform.h"
 #include "flow/UnitTest.h"
 #include <iostream>
+#include "flow/actorcompiler.h" // has to be last include
 
 IAsyncFile::~IAsyncFile() = default;
 
@@ -87,7 +88,7 @@ ACTOR static Future<Void> incrementalDeleteHelper( std::string filename, bool mu
 	state bool exists = fileExists(filename);
 
 	if(exists) {
-		Reference<IAsyncFile> f = wait(IAsyncFileSystem::filesystem()->open(filename, IAsyncFile::OPEN_READWRITE | IAsyncFile::OPEN_UNCACHED, 0));
+		Reference<IAsyncFile> f = wait(IAsyncFileSystem::filesystem()->open(filename, IAsyncFile::OPEN_READWRITE | IAsyncFile::OPEN_UNCACHED | IAsyncFile::OPEN_UNBUFFERED, 0));
 		file = f;
 
 		int64_t fileSize = wait(file->size());

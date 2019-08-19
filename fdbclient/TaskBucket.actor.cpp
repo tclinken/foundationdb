@@ -20,6 +20,7 @@
 
 #include "fdbclient/TaskBucket.h"
 #include "fdbclient/ReadYourWrites.h"
+#include "flow/actorcompiler.h" // has to be last include
 
 Reference<TaskFuture> Task::getDoneFuture(Reference<FutureBucket> fb) {
 	return fb->unpack(params[reservedTaskParamKeyDone]);
@@ -130,20 +131,24 @@ unsigned int Task::getPriority() const {
 class TaskBucketImpl {
 public:
 	ACTOR static Future<Optional<Key>> getTaskKey(Reference<ReadYourWritesTransaction> tr, Reference<TaskBucket> taskBucket, int priority = 0) {
-		Standalone<StringRef> uid = StringRef(g_random->randomUniqueID().toString());
+		Standalone<StringRef> uid = StringRef(deterministicRandom()->randomUniqueID().toString());
 
 		// Get keyspace for the specified priority level
 		state Subspace space = taskBucket->getAvailableSpace(priority);
 
-		// Get a task key that is <= a random UID task key, if successful then return it
-		Key k = wait(tr->getKey(lastLessOrEqual(space.pack(uid)), true));
-		if(space.contains(k))
-			return Optional<Key>(k);
+		{
+			// Get a task key that is <= a random UID task key, if successful then return it
+			Key k = wait(tr->getKey(lastLessOrEqual(space.pack(uid)), true));
+			if(space.contains(k))
+				return Optional<Key>(k);
+		}
 
-		// Get a task key that is <= the maximum possible UID, if successful return it.
-		Key k = wait(tr->getKey(lastLessOrEqual(space.pack(maxUIDKey)), true));
-		if(space.contains(k))
-			return Optional<Key>(k);
+		{
+			// Get a task key that is <= the maximum possible UID, if successful return it.
+			Key k = wait(tr->getKey(lastLessOrEqual(space.pack(maxUIDKey)), true));
+			if(space.contains(k))
+				return Optional<Key>(k);
+		}
 
 		return Optional<Key>();
 	}
@@ -156,7 +161,7 @@ public:
 
 		// give it some chances for the timed out tasks to get into the task loop in the case of 
 		// many other new tasks get added so that the timed out tasks never get chances to re-run
-		if (g_random->random01() < CLIENT_KNOBS->TASKBUCKET_CHECK_TIMEOUT_CHANCE) {
+		if (deterministicRandom()->random01() < CLIENT_KNOBS->TASKBUCKET_CHECK_TIMEOUT_CHANCE) {
 			bool anyTimeouts = wait(requeueTimedOutTasks(tr, taskBucket));
 			TEST(anyTimeouts); // Found a task that timed out
 		}
@@ -208,7 +213,7 @@ public:
 
 		state Standalone<RangeResultRef> values = wait(tr->getRange(taskAvailableSpace.range(), CLIENT_KNOBS->TOO_MANY));
 		Version version = wait(tr->getReadVersion());
-		task->timeoutVersion = version + (uint64_t)(taskBucket->timeout * (CLIENT_KNOBS->TASKBUCKET_TIMEOUT_JITTER_OFFSET + CLIENT_KNOBS->TASKBUCKET_TIMEOUT_JITTER_RANGE * g_random->random01()));
+		task->timeoutVersion = version + (uint64_t)(taskBucket->timeout * (CLIENT_KNOBS->TASKBUCKET_TIMEOUT_JITTER_OFFSET + CLIENT_KNOBS->TASKBUCKET_TIMEOUT_JITTER_RANGE * deterministicRandom()->random01()));
 
 		Subspace timeoutSpace = taskBucket->timeouts.get(task->timeoutVersion).get(taskUID);
 
@@ -220,7 +225,7 @@ public:
 
 		// Clear task definition in the available keyspace
 		tr->clear(taskAvailableSpace.range());
-		tr->set(taskBucket->active.key(), g_random->randomUniqueID().toString());
+		tr->set(taskBucket->active.key(), deterministicRandom()->randomUniqueID().toString());
 
 		return task;
 	}
@@ -230,15 +235,15 @@ public:
 
 		if (task->params.find(Task::reservedTaskParamValidKey) == task->params.end()) {
 			TraceEvent("TB_TaskVerifyInvalidTask")
-				.detail("Task", printable(task->params[Task::reservedTaskParamKeyType]))
+				.detail("Task", task->params[Task::reservedTaskParamKeyType])
 				.detail("ReservedTaskParamValidKey", "missing");
 			return false;
 		}
 
 		if (task->params.find(Task::reservedTaskParamValidValue) == task->params.end()) {
 			TraceEvent("TB_TaskVerifyInvalidTask")
-				.detail("Task", printable(task->params[Task::reservedTaskParamKeyType]))
-				.detail("ReservedTaskParamValidKey", printable(task->params[Task::reservedTaskParamValidKey]))
+				.detail("Task", task->params[Task::reservedTaskParamKeyType])
+				.detail("ReservedTaskParamValidKey", task->params[Task::reservedTaskParamValidKey])
 				.detail("ReservedTaskParamValidValue", "missing");
 			return false;
 		}
@@ -249,19 +254,19 @@ public:
 
 		if (!keyValue.present()) {
 			TraceEvent("TB_TaskVerifyInvalidTask")
-				.detail("Task", printable(task->params[Task::reservedTaskParamKeyType]))
-				.detail("ReservedTaskParamValidKey", printable(task->params[Task::reservedTaskParamValidKey]))
-				.detail("ReservedTaskParamValidValue", printable(task->params[Task::reservedTaskParamValidValue]))
+				.detail("Task", task->params[Task::reservedTaskParamKeyType])
+				.detail("ReservedTaskParamValidKey", task->params[Task::reservedTaskParamValidKey])
+				.detail("ReservedTaskParamValidValue", task->params[Task::reservedTaskParamValidValue])
 				.detail("KeyValue", "missing");
 			return false;
 		}
 
 		if (keyValue.get().compare(StringRef(task->params[Task::reservedTaskParamValidValue]))) {
 			TraceEvent("TB_TaskVerifyAbortedTask")
-				.detail("Task", printable(task->params[Task::reservedTaskParamKeyType]))
-				.detail("ReservedTaskParamValidKey", printable(task->params[Task::reservedTaskParamValidKey]))
-				.detail("ReservedTaskParamValidValue", printable(task->params[Task::reservedTaskParamValidValue]))
-				.detail("KeyValue", printable(keyValue.get()));
+				.detail("Task", task->params[Task::reservedTaskParamKeyType])
+				.detail("ReservedTaskParamValidKey", task->params[Task::reservedTaskParamValidKey])
+				.detail("ReservedTaskParamValidValue", task->params[Task::reservedTaskParamValidValue])
+				.detail("KeyValue", keyValue.get());
 			return false;
 		}
 
@@ -322,7 +327,7 @@ public:
 			state FlowLock::Releaser releaser;
 
 			// Wait until we are half way to the timeout version of this task
-			wait(delay(0.8 * (BUGGIFY ? (2 * g_random->random01()) : 1.0) * (double)(task->timeoutVersion - (uint64_t)versionNow) / CLIENT_KNOBS->CORE_VERSIONSPERSECOND));
+			wait(delay(0.8 * (BUGGIFY ? (2 * deterministicRandom()->random01()) : 1.0) * (double)(task->timeoutVersion - (uint64_t)versionNow) / CLIENT_KNOBS->CORE_VERSIONSPERSECOND));
 
 			// Take the extendMutex lock until we either succeed or stop trying to extend due to failure
 			wait(task->extendMutex.take());
@@ -391,7 +396,7 @@ public:
 		} catch(Error &e) {
 			TraceEvent(SevWarn, "TB_ExecuteFailure")
 				.error(e)
-				.detail("TaskUID", task->key.printable())
+				.detail("TaskUID", task->key)
 				.detail("TaskType", task->params[Task::reservedTaskParamKeyType].printable())
 				.detail("Priority", task->getPriority());
 			try {
@@ -459,7 +464,7 @@ public:
 			// Wait for a task to be done.  Also, if we have any slots available then stop waiting after pollDelay at the latest.
 			Future<Void> w = ready(waitForAny(tasks));
 			if(!availableSlots.empty())
-				w = w || delay(*pollDelay * (0.9 + g_random->random01() / 5));   // Jittered by 20 %, so +/- 10%
+				w = w || delay(*pollDelay * (0.9 + deterministicRandom()->random01() / 5));   // Jittered by 20 %, so +/- 10%
 			wait(w);
 
 			// Check all of the task slots, any that are finished should be replaced with Never() and their slots added back to availableSlots
@@ -519,7 +524,7 @@ public:
 
 		// Check all available priorities for keys
 		state std::vector<Future<Standalone<RangeResultRef>>> resultFutures;
-		for(unsigned int pri = 0; pri <= CLIENT_KNOBS->TASKBUCKET_MAX_PRIORITY; ++pri)
+		for(int pri = 0; pri <= CLIENT_KNOBS->TASKBUCKET_MAX_PRIORITY; ++pri)
 			resultFutures.push_back(tr->getRange(taskBucket->getAvailableSpace(pri).range(), 1));
 
 		// If any priority levels have any keys then the taskbucket is not empty so return false
@@ -542,7 +547,7 @@ public:
 
 		// Check all available priorities for emptiness
 		state std::vector<Future<Standalone<RangeResultRef>>> resultFutures;
-		for(unsigned int pri = 0; pri <= CLIENT_KNOBS->TASKBUCKET_MAX_PRIORITY; ++pri)
+		for(int pri = 0; pri <= CLIENT_KNOBS->TASKBUCKET_MAX_PRIORITY; ++pri)
 			resultFutures.push_back(tr->getRange(taskBucket->getAvailableSpace(pri).range(), 1));
 
 		// If any priority levels have any keys then return true as the level is 'busy'
@@ -591,7 +596,7 @@ public:
 
 				bool is_busy = wait(isBusy(tr, taskBucket));
 				if (!is_busy) {
-					Key _ = wait(addIdle(tr, taskBucket));
+					wait(success(addIdle(tr, taskBucket)));
 				}
 
 				Optional<Value> val = wait(tr->get(taskBucket->active.key()));
@@ -704,14 +709,14 @@ public:
 		tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 		tr->setOption(FDBTransactionOptions::LOCK_AWARE);
 		Standalone<RangeResultRef> values = wait(tr->getRange(subspace.range(), CLIENT_KNOBS->TOO_MANY));
-		TraceEvent("TaskBucket").detail("DebugPrintRange", "Print DB Range").detail("Key", printable(subspace.key())).detail("Count", values.size()).detail("Msg", printable(msg));
-		/*
-		printf("debugPrintRange  key: (%d) %s\n", values.size(), printable(subspace.key()).c_str());
+		TraceEvent("TaskBucket").detail("DebugPrintRange", "Print DB Range").detail("Key", subspace.key()).detail("Count", values.size()).detail("Msg", msg);
+		
+		/*printf("debugPrintRange  key: (%d) %s\n", values.size(), printable(subspace.key()).c_str());
 		for (auto & s : values) {
-			printf("   key: %-40s   value: %s\n", printable(s.key).c_str(), printable(s.value).c_str());
-			TraceEvent("TaskBucket").detail("DebugPrintRange", printable(msg))
-				.detail("Key", printable(s.key))
-				.detail("Value", printable(s.value));
+			printf("   key: %-40s   value: %s\n", printable(s.key).c_str(), s.value.c_str());
+			TraceEvent("TaskBucket").detail("DebugPrintRange", msg)
+				.detail("Key", s.key)
+				.detail("Value", s.value);
 		}*/
 
 		return Void();
@@ -807,7 +812,7 @@ Future<Void> TaskBucket::changePause(Reference<ReadYourWritesTransaction> tr, bo
 Key TaskBucket::addTask(Reference<ReadYourWritesTransaction> tr, Reference<Task> task) {
 	setOptions(tr);
 
-	Key key(g_random->randomUniqueID().toString());
+	Key key(deterministicRandom()->randomUniqueID().toString());
 
 	Subspace taskSpace;
 
@@ -841,8 +846,8 @@ ACTOR static Future<Key> actorAddTask(TaskBucket* tb, Reference<ReadYourWritesTr
 
 	if (!validationValue.present()) {
 		TraceEvent(SevError, "TB_AddTaskInvalidKey")
-			.detail("Task", printable(task->params[Task::reservedTaskParamKeyType]))
-			.detail("ValidationKey", printable(validationKey));
+			.detail("Task", task->params[Task::reservedTaskParamKeyType])
+			.detail("ValidationKey", validationKey);
 		throw invalid_option_value();
 	}
 
@@ -993,7 +998,7 @@ public:
 	ACTOR static Future<Void> _join(Reference<ReadYourWritesTransaction> tr, Reference<TaskBucket> taskBucket, Reference<TaskFuture> taskFuture, std::vector<Reference<TaskFuture>> vectorFuture) {
 		std::vector<Future<Void>> onSetFutures;
 		for (int i = 0; i < vectorFuture.size(); ++i) {
-			Key key = StringRef(g_random->randomUniqueID().toString());
+			Key key = StringRef(deterministicRandom()->randomUniqueID().toString());
 			taskFuture->addBlock(tr, key);
 			Reference<Task> task(new Task());
 			task->params[Task::reservedTaskParamKeyType] = LiteralStringRef("UnblockFuture");
@@ -1028,7 +1033,7 @@ public:
 		}
 		else {
 			TEST(true);	// is_set == false
-			Subspace callbackSpace = taskFuture->callbacks.get(StringRef(g_random->randomUniqueID().toString()));
+			Subspace callbackSpace = taskFuture->callbacks.get(StringRef(deterministicRandom()->randomUniqueID().toString()));
 			for (auto & v : task->params) {
 				tr->set(callbackSpace.pack(v.key), v.value);
 			}
@@ -1109,8 +1114,8 @@ public:
 
 		if (!validationValue.present()) {
 			TraceEvent(SevError, "TB_OnSetAddTaskInvalidKey")
-				.detail("Task", printable(task->params[Task::reservedTaskParamKeyType]))
-				.detail("ValidationKey", printable(validationKey));
+				.detail("Task", task->params[Task::reservedTaskParamKeyType])
+				.detail("ValidationKey", validationKey);
 			throw invalid_option_value();
 		}
 
@@ -1150,7 +1155,7 @@ TaskFuture::TaskFuture(const Reference<FutureBucket> bucket, Key k)
 	: futureBucket(bucket), key(k)
 {
 	if (k.size() == 0) {
-		key = g_random->randomUniqueID().toString();
+		key = deterministicRandom()->randomUniqueID().toString();
 	}
 
 	prefix = futureBucket->prefix.get(key);

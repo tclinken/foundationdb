@@ -18,9 +18,9 @@
  * limitations under the License.
  */
 
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "fdbrpc/simulator.h"
 #include "fdbserver/MasterInterface.h"
 #include "fdbclient/SystemData.h"
@@ -56,7 +56,7 @@ struct RollbackWorkload : TestWorkload {
 	}
 
 	ACTOR Future<Void> simulateFailure( Database cx, RollbackWorkload* self ) {
-		auto system = self->dbInfo->get();
+		state ServerDBInfo system = self->dbInfo->get();
 		auto tlogs = system.logSystemConfig.allPresentLogs();
 		
 		if( tlogs.empty() || system.client.proxies.empty() ) {
@@ -64,9 +64,9 @@ struct RollbackWorkload : TestWorkload {
 			return Void();
 		}
 
-		state MasterProxyInterface proxy = g_random->randomChoice( system.client.proxies );
+		state MasterProxyInterface proxy = deterministicRandom()->randomChoice( system.client.proxies );
 
-		int utIndex = g_random->randomInt(0, tlogs.size());
+		int utIndex = deterministicRandom()->randomInt(0, tlogs.size());
 		state NetworkAddress uncloggedTLog = tlogs[utIndex].address();
 
 		for(int t=0; t<tlogs.size(); t++)
@@ -90,7 +90,7 @@ struct RollbackWorkload : TestWorkload {
 
 		// While the clogged machines are still clogged...
 		wait( delay( self->clogDuration/3 ) );
-		auto system = self->dbInfo->get();
+		system = self->dbInfo->get();
 
 		// Kill the proxy and the unclogged tlog
 		if (self->enableFailures) {
@@ -112,7 +112,7 @@ struct RollbackWorkload : TestWorkload {
 				wait( self->simulateFailure( cx, self ) );
 			}
 		} else {
-			wait( ::delay( g_random->random01()*std::max(0.0, self->testDuration - self->clogDuration*13.0) ) );
+			wait( ::delay( deterministicRandom()->random01()*std::max(0.0, self->testDuration - self->clogDuration*13.0) ) );
 			wait( self->simulateFailure(cx, self) );
 		}
 		return Void();

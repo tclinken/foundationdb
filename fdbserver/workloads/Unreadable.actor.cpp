@@ -19,11 +19,11 @@
  */
 
 #include "fdbrpc/ContinuousSample.h"
-#include "fdbclient/NativeAPI.h"
-#include "fdbserver/TesterInterface.h"
+#include "fdbclient/NativeAPI.actor.h"
+#include "fdbserver/TesterInterface.actor.h"
 #include "fdbserver/workloads/BulkSetup.actor.h"
 #include "fdbclient/ReadYourWrites.h"
-#include "fdbserver/workloads/workloads.h"
+#include "fdbserver/workloads/workloads.actor.h"
 #include "flow/actorcompiler.h"  // This must be the last #include.
 
 struct UnreadableWorkload : TestWorkload {
@@ -308,7 +308,7 @@ struct UnreadableWorkload : TestWorkload {
 			setMap[normalKeys.end] = ValueRef();
 
 			for (; opCount < 500; opCount++) {
-				int r = g_random->randomInt(0, 19);
+				int r = deterministicRandom()->randomInt(0, 19);
 				if (r <= 10) {
 					key = RandomTestImpl::getRandomKey(arena);
 					value = RandomTestImpl::getRandomValue(arena);
@@ -350,8 +350,8 @@ struct UnreadableWorkload : TestWorkload {
 				}
 				else if (r == 16) {
 					range = RandomTestImpl::getRandomRange(arena);
-					snapshot = g_random->random01() < 0.05;
-					reverse = g_random->random01() < 0.5;
+					snapshot = deterministicRandom()->random01() < 0.05;
+					reverse = deterministicRandom()->random01() < 0.5;
 
 					if (snapshot)
 						tr.setOption(FDBTransactionOptions::SNAPSHOT_RYW_DISABLE);
@@ -362,10 +362,11 @@ struct UnreadableWorkload : TestWorkload {
 						tr.setOption(FDBTransactionOptions::SNAPSHOT_RYW_ENABLE);
 					if (!value.isError() || value.getError().code() == error_code_accessed_unreadable) {
 						//TraceEvent("RYWT_GetRange").detail("Range", printable(range)).detail("IsUnreadable", value.isError());
-						if (snapshot)
+						if (snapshot) {
 							ASSERT(!value.isError());
-						else
+						} else {
 							ASSERT(containsUnreadable(unreadableMap, range, true).present() == value.isError());
+						}
 					}
 					else {
 						//TraceEvent("RYWT_Reset1").error(value.getError(), true);
@@ -381,9 +382,9 @@ struct UnreadableWorkload : TestWorkload {
 				else if (r == 17) {
 					begin = RandomTestImpl::getRandomKeySelector(arena);
 					end = RandomTestImpl::getRandomKeySelector(arena);
-					limit = g_random->randomInt(1, 100);   // maximum number of results to return from the db
-					snapshot = g_random->random01() < 0.05;
-					reverse = g_random->random01() < 0.5;
+					limit = deterministicRandom()->randomInt(1, 100);   // maximum number of results to return from the db
+					snapshot = deterministicRandom()->random01() < 0.05;
+					reverse = deterministicRandom()->random01() < 0.5;
 
 					if (snapshot)
 						tr.setOption(FDBTransactionOptions::SNAPSHOT_RYW_DISABLE);
@@ -427,7 +428,7 @@ struct UnreadableWorkload : TestWorkload {
 				}
 				else if (r == 18) {
 					key = RandomTestImpl::getRandomKey(arena);
-					snapshot = g_random->random01() < 0.05;
+					snapshot = deterministicRandom()->random01() < 0.05;
 
 					if (snapshot)
 						tr.setOption(FDBTransactionOptions::SNAPSHOT_RYW_DISABLE);
