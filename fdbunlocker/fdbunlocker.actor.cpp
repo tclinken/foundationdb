@@ -16,43 +16,62 @@
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 void printUsage(const char* name) {
-	printf("usage: %s --connfile <CONNFILE> (--lockuid <LOCKUID> | --force)\n", name);
+	printf("usage: %s --connfile <CONNFILE> (--lockuid <LOCKUID> | --force) [--version <VERSION]\n", name);
 }
 
-Database getDB(std::string clusterFileName) {
+Database getDatabase(std::string clusterFileName) {
 	std::pair<std::string, bool> resolvedClusterFile = ClusterConnectionFile::lookupClusterFileName(clusterFileName);
 	Reference<ClusterConnectionFile> ccf(new ClusterConnectionFile(resolvedClusterFile.first));
 	return Database::createDatabase(ccf, -1, false);
 }
 
-ACTOR Future<Void> forceUnlockDB(std::string clusterFileName) {
-	try {
-		// does not retry if transaction fails
-		Database db = getDB(clusterFileName);
-		state Transaction tr(db);
+ACTOR Future<Optional<UID>> getLockUID(Transaction* tr) {
+	Optional<Value> val = wait(tr->get(databaseLockedKey));
+	if (val.present()) {
+		return BinaryReader::fromStringRef<UID>(val.get().substr(10), Unversioned());
+	}
+	return {};
+}
+
+ACTOR Future<Void> advanceVersion(Database db, Version v) {
+	state Transaction tr(db);
+	loop {
 		tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 		tr.setOption(FDBTransactionOptions::LOCK_AWARE);
-		Optional<Value> val = wait(tr.get(databaseLockedKey));
-		if (val.present()) {
-			auto lockUID = BinaryReader::fromStringRef<UID>(val.get().substr(10), Unversioned());
-			wait(timeoutError(unlockDatabase(&tr, lockUID), 5.0));
-			wait(tr.commit());
+		try {
+			Version rv = wait(tr.getReadVersion());
+			if (rv <= v) {
+				tr.set(minRequiredCommitVersionKey, BinaryWriter::toValue(v + 1, Unversioned()));
+				wait(tr.commit()); // this commit will always throw an error, because recovery is forced
+			} else {
+				return Void();
+			}
+		} catch (Error& e) {
+			wait(tr.onError(e));
 		}
-		printf("Database unlocked.\n");
-		g_network->stop();
-		return Void();
-	} catch (Error& e) {
-		printf("Error occurred while attempting to unlock database: %s (%d).\n", e.what(), e.code());
-		g_network->stop();
-		throw e;
 	}
 }
 
-ACTOR Future<Void> unlockDB(std::string clusterFileName, UID lockUID) {
+ACTOR Future<Void> unlockDB(std::string clusterFileName, Optional<Version> version, Optional<UID> lockUID) {
 	try {
-		Database db = getDB(clusterFileName);
-		wait(timeoutError(unlockDatabase(db, lockUID), 5.0));
-		printf("Databse unlocked.\n");
+		state Database db = getDatabase(clusterFileName);
+		if (version.present()) {
+			wait(timeoutError(advanceVersion(db, version.get()), 10.0));
+		}
+		state Transaction tr(db); // Does not retry if transaction fails
+		tr.setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
+		tr.setOption(FDBTransactionOptions::LOCK_AWARE);
+		if (!lockUID.present()) {
+			// if we are forcing an unlock, find the current lock UID, if there is one
+			Optional<UID> _lockUID = wait(getLockUID(&tr));
+			lockUID = _lockUID;
+		}
+		if (lockUID.present()) {
+			// if database is locked, unlock using current lock UID
+			wait(timeoutError(unlockDatabase(&tr, lockUID.get()), 10.0));
+			wait(timeoutError(tr.commit(), 10.0));
+		}
+		printf("Database unlocked.\n");
 		g_network->stop();
 		return Void();
 	} catch (Error& e) {
@@ -65,6 +84,7 @@ ACTOR Future<Void> unlockDB(std::string clusterFileName, UID lockUID) {
 int main(int argc, char** argv) {
 	Optional<std::string> clusterFileName;
 	Optional<UID> lockUID;
+	Optional<Version> version;
 	bool force = false;
 
 	for (int i = 1; i < argc; ++i) {
@@ -100,6 +120,16 @@ int main(int argc, char** argv) {
 				return 1;
 			}
 			force = true;
+		} else if (arg == "-v" || arg == "--version") {
+			if (version.present()) {
+				printUsage(argv[0]);
+				return 1;
+			}
+			if (i + 1 >= argc) {
+				printf("Expecting an argument after %s\n", argv[i]);
+				return 1;
+			}
+			version = std::stoi(std::string(argv[++i]));
 		} else {
 			printf("Unexpected argument: %s\n", argv[i]);
 		}
@@ -114,7 +144,7 @@ int main(int argc, char** argv) {
 		initSignalSafeUnwind();
 		registerCrashHandler();
 		setupNetwork();
-		auto f = force ? forceUnlockDB(clusterFileName.get()) : unlockDB(clusterFileName.get(), lockUID.get());
+		auto f = unlockDB(clusterFileName.get(), version, force ? Optional<UID>{} : lockUID);
 		runNetwork();
 	} catch (Error& e) {
 		printf("ERROR: %s (%d)\n", e.what(), e.code());
