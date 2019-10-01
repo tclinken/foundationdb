@@ -1170,6 +1170,11 @@ ACTOR Future<Optional<Value>> getJSON(Reference<ClusterConnectionFile> clusterFi
 	return getValueFromJSON(statusObj);
 }
 
+ACTOR Future<Optional<Value>> getHealthMetricsFlatbuffers(Database db) {
+	HealthMetrics metrics = wait(db->getHealthMetrics(true));
+	return ObjectWriter::toValue(metrics, Unversioned());
+}
+
 ACTOR Future<Standalone<RangeResultRef>> getWorkerInterfaces (Reference<ClusterConnectionFile> clusterFile){
 	state Reference<AsyncVar<Optional<ClusterInterface>>> clusterInterface(new AsyncVar<Optional<ClusterInterface>>);
 	state Future<Void> leaderMon = monitorLeader<ClusterInterface>(clusterFile, clusterInterface);
@@ -1199,8 +1204,16 @@ Future< Optional<Value> > ReadYourWritesTransaction::get( const Key& key, bool s
 		else {
 			return Optional<Value>();
 		}
-	} 
-	
+	}
+
+	if (key == LiteralStringRef("\xff\xff/healthmetrics")) {
+		if (tr.getDatabase().getPtr() && tr.getDatabase()->getConnectionFile()) {
+			return getHealthMetricsFlatbuffers(tr.getDatabase());
+		} else {
+			return Optional<Value>();
+		}
+	}
+
 	if (key == LiteralStringRef("\xff\xff/cluster_file_path")) {
 		try {
 			if (tr.getDatabase().getPtr() && tr.getDatabase()->getConnectionFile()) {
