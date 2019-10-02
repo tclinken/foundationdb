@@ -839,6 +839,8 @@ struct ClusterControllerPriorityInfo {
 };
 
 struct HealthMetrics {
+	constexpr static FileIdentifier file_identifier = 9630847;
+
 	struct StorageStats {
 		int64_t storageQueue;
 		int64_t storageDurabilityLag;

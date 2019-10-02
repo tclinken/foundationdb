@@ -328,7 +328,7 @@ void DLApi::init() {
 void DLApi::selectApiVersion(int apiVersion) {
 	// External clients must support at least this version
 	// Versions newer than what we understand are rejected in the C bindings
-	headerVersion = std::max(apiVersion, 400);
+	headerVersion = std::max(apiVersion, 300);
 
 	init();
 	throwIfError(api->selectApiVersion(apiVersion, headerVersion));
@@ -548,10 +548,7 @@ void MultiVersionTransaction::addReadConflictRange(const KeyRangeRef& keys) {
 }
 
 void MultiVersionTransaction::atomicOp(const KeyRef& key, const ValueRef& value, uint32_t operationType) {
-	auto tr = getTransaction();
-	if(tr.transaction) {
-		tr.transaction->atomicOp(key, value, operationType);
-	}
+	throw client_invalid_operation();
 }
 
 void MultiVersionTransaction::set(const KeyRef& key, const ValueRef& value) {
@@ -1098,6 +1095,17 @@ void MultiVersionApi::setNetworkOptionInternal(FDBNetworkOptions::Option option,
 void MultiVersionApi::setupNetwork() {
 	if(!externalClient) {
 		loadEnvironmentVariableNetworkOptions();
+	}
+
+	{
+		MutexHolder holder(lock);
+		try {
+			addExternalLibrary("/usr/lib64/external/libfdb_c.so");
+		} catch (Error& e) {
+			if (e.code() != error_code_file_not_found) {
+				throw;
+			}
+		}
 	}
 
 	uint64_t transportId = 0;
