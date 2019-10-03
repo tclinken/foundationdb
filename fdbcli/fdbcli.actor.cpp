@@ -2562,6 +2562,10 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 
 	state bool writeMode = false;
 
+#ifdef FDBCLI_RW
+	writeMode = true;
+#endif
+
 	state std::string clusterConnectString;
 	state std::map<Key,Value> address_interface;
 
