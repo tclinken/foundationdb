@@ -2553,6 +2553,12 @@ Future<T> stopNetworkAfter( Future<T> what ) {
 	}
 }
 
+#ifdef FDBCLI_RW
+constexpr bool defaultWriteMode = true;
+#else
+constexpr bool defaultWriteMode = false;
+#endif
+
 ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 	state LineNoise& linenoise = *plinenoise;
 	state bool intrans = false;
@@ -2560,11 +2566,7 @@ ACTOR Future<int> cli(CLIOptions opt, LineNoise* plinenoise) {
 	state Database db;
 	state Reference<ReadYourWritesTransaction> tr;
 
-	state bool writeMode = false;
-
-#ifdef FDBCLI_RW
-	writeMode = true;
-#endif
+	state bool writeMode = defaultWriteMode;
 
 	state std::string clusterConnectString;
 	state std::map<Key,Value> address_interface;
