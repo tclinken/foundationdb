@@ -417,10 +417,6 @@ static void printProgramUsage(const char* name) {
 	       "  --trace_format FORMAT\n"
 	       "                 Select the format of the log files. xml (the default) and json\n"
 	       "                 are supported. Has no effect unless --log is specified.\n"
-	       "  -S ON|OFF, --object-serializer ON|OFF\n"
-	       "                 Use object serializer for sending messages. The object serializer\n"
-	       "                 is currently a beta feature and it allows fdb processes to talk to\n"
-	       "                 each other even if they don't have the same version\n"
 	       "  --exec CMDS    Immediately executes the semicolon separated CLI commands\n"
 	       "                 and then exits.\n"
 	       "  --no-status    Disables the initial status check done when starting\n"
@@ -2216,6 +2212,7 @@ ACTOR Future<bool> exclude( Database db, std::vector<StringRef> tokens, Referenc
 
 ACTOR Future<bool> createSnapshot(Database db, std::vector<StringRef> tokens ) {
 	state Standalone<StringRef> snapCmd;
+	state UID snapUID = deterministicRandom()->randomUniqueID();
 	for ( int i = 1; i < tokens.size(); i++) {
 		snapCmd = snapCmd.withSuffix(tokens[i]);
 		if (i != tokens.size() - 1) {
@@ -2223,11 +2220,11 @@ ACTOR Future<bool> createSnapshot(Database db, std::vector<StringRef> tokens ) {
 		}
 	}
 	try {
-		UID snapUID = wait(makeInterruptable(mgmtSnapCreate(db, snapCmd)));
+		wait(makeInterruptable(mgmtSnapCreate(db, snapCmd, snapUID)));
 		printf("Snapshot command succeeded with UID %s\n", snapUID.toString().c_str());
 	} catch (Error& e) {
-		fprintf(stderr, "Snapshot create failed %d (%s)."
-				" Please cleanup any instance level snapshots created.\n", e.code(), e.what());
+		fprintf(stderr, "Snapshot command failed %d (%s)."
+				" Please cleanup any instance level snapshots created with UID %s.\n", e.code(), e.what(), snapUID.toString().c_str());
 		return true;
 	}
 	return false;
