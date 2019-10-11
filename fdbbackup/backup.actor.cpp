@@ -85,7 +85,7 @@ enum enumDBType {
 };
 
 enum enumRestoreType {
-	RESTORE_UNKNOWN, RESTORE_START, RESTORE_STATUS, RESTORE_ABORT, RESTORE_WAIT
+	RESTORE_UNKNOWN, RESTORE_START, RESTORE_STATUS, RESTORE_ABORT, RESTORE_WAIT, RESTORE_V3
 };
 
 //
@@ -985,7 +985,7 @@ static void printBackupUsage(bool devhelp) {
 
 static void printRestoreUsage(bool devhelp ) {
 	printf("FoundationDB " FDB_VT_PACKAGE_NAME " (v" FDB_VT_VERSION ")\n");
-	printf("Usage: %s (start | status | abort | wait) [OPTIONS]\n\n", exeRestore.toString().c_str());
+	printf("Usage: %s (start | status | abort | wait | restorev3) [OPTIONS]\n\n", exeRestore.toString().c_str());
 	//printf("  FOLDERS        Paths to folders containing the backup files.\n");
 	printf("Options for all commands:\n\n");
 	printf("  --dest_cluster_file CONNFILE\n");
@@ -1251,6 +1251,7 @@ enumRestoreType getRestoreType(std::string name) {
 	if(name == "abort") return RESTORE_ABORT;
 	if(name == "status") return RESTORE_STATUS;
 	if(name == "wait") return RESTORE_WAIT;
+	if(name == "restorev3") return RESTORE_V3;
 	return RESTORE_UNKNOWN;
 }
 
@@ -3285,6 +3286,8 @@ int main(int argc, char* argv[]) {
 		Future<Optional<Void>> f;
 		Future<Optional<int>> fstatus;
 		Reference<IBackupContainer> c;
+		std::vector<std::string> restoreFolders;
+		Future<Optional<Version>> version;
 
 		try {
 			setupNetwork(0, true);
@@ -3544,6 +3547,12 @@ int main(int argc, char* argv[]) {
 						printf("%s\n", s.c_str());
 						return Void();
 					}) );
+					break;
+				case RESTORE_V3:
+					TraceEvent(SevInfo, "RestoreContainer")
+						.detail("Container", restoreContainer.substr(7));
+					restoreFolders.push_back(restoreContainer.substr(7));
+					version = stopAfter( restoreV3(db, restoreFolders, restoreVersion, !quietDisplay) );
 					break;
 				default:
 					throw restore_error();

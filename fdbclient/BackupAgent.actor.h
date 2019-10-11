@@ -845,5 +845,10 @@ public:
 	}
 };
 
+ACTOR Future<Version> restoreV3(Database cx,
+                                std::vector<std::string> folders,
+                                Version targetVersion,
+                                bool displayInfo);
+
 #include "flow/unactorcompiler.h"
 #endif

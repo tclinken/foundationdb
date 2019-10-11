@@ -4419,3 +4419,717 @@ Future<int> FileBackupAgent::waitBackup(Database cx, std::string tagName, bool s
 	return FileBackupAgentImpl::waitBackup(this, cx, tagName, stopWhenDone, pContainer, pUID);
 }
 
+//
+// File Information
+//
+static bool getFileInfo(
+	std::multimap<int64_t, std::tuple<std::string, std::string, std::string,
+										std::string>>& fileInfo,
+	std::set<Version>& dataInfo,
+	std::multimap<int64_t, std::tuple<Version, std::string>>& logInfo,
+	std::string filename, std::string folder, std::string prefix,
+	int32_t weight, std::string suffix)
+{
+	if (filename.find(prefix) != 0)
+		return false;
+
+	if (filename.rfind(suffix) != (filename.size() - suffix.size()))
+		return false;
+
+	std::string info = filename.substr(0, filename.size() - suffix.size());
+	std::tuple<std::string, std::string, std::string, std::string> tuple;
+	size_t offset = info.find_first_of(',', 0);
+	if (offset != std::string::npos) {
+		std::get<0>(tuple) = info.substr(0, offset);
+		offset += 1;
+		size_t offset1 = info.find_first_of(',', offset);
+		if (offset1 != std::string::npos) {
+			std::string value = info.substr(offset, offset1 - offset);
+			std::get<1>(tuple) = value;
+			Version version = getVersionFromString(value);
+
+			offset = offset1 + 1;
+			std::get<2>(tuple) = info.substr(offset);
+			std::get<3>(tuple) = joinPath(folder, filename);
+			fileInfo.insert(
+				std::pair<int64_t, std::tuple<std::string, std::string,
+												std::string, std::string>>(
+					version * 2 + weight, tuple));
+			if (prefix == "backup") {
+				// TraceEvent("BA_getFileInfo").detail("filename",
+				// filename).detail("version", version);
+				dataInfo.insert(version);
+			} else if (prefix == "log")
+				logInfo.insert(
+					std::pair<int64_t, std::tuple<Version, std::string>>(
+						version * 2 + weight,
+						std::make_tuple(version, info.substr(offset))));
+			return true;
+		}
+	}
+
+	return false;
+    }
+
+static Void getFolderMetaInfo(
+	std::vector<std::string> folders, Version* pMinRestoreVersion,
+	Version* pMaxRestoreVersion,
+	std::multimap<int64_t, std::tuple<std::string, std::string, std::string,
+										std::string>>* pFileInfoArg,
+	std::string* pRestorableFile)
+{
+	std::multimap<int64_t, std::tuple<std::string, std::string, std::string,
+										std::string>>
+		fileInfo;
+	std::multimap<int64_t, std::tuple<std::string, std::string, std::string,
+										std::string>>* pFileInfo = &fileInfo;
+	std::set<Version> dataInfo;
+	std::multimap<int64_t, std::tuple<Version, std::string>> logInfo;
+	bool foundRestorable = false;
+	std::string versionText, fileVerInfo;
+
+	// Use the passed argument, if defined
+	if (pFileInfoArg) {
+		pFileInfoArg->clear();
+		pFileInfo = pFileInfoArg;
+	}
+
+	for (auto& folder : folders) {
+
+		// TraceEvent(SevInfo, "BA_getVersions_search").detail("folder",
+		// folder);
+
+		vector<std::string> existingFiles = platform::listFiles(folder, "");
+
+		std::map<Version, Version> end_begin;
+		for (auto& filename : existingFiles) {
+			if (filename.find("log") == 0 &&
+				filename.rfind(".trlog") == (filename.size() - 6)) {
+				fileVerInfo = filename.substr(4, filename.size() - 10);
+				size_t offset = fileVerInfo.find_first_of(',', 0);
+
+				versionText = fileVerInfo.substr(0, offset);
+				Version beginVer = getVersionFromString(versionText);
+
+				versionText = fileVerInfo.substr(offset + 1);
+				Version endVer = getVersionFromString(versionText);
+
+				if (end_begin.count(endVer))
+					beginVer = std::min(beginVer, end_begin[endVer]);
+				end_begin[endVer] = beginVer;
+			}
+		}
+
+		Version lastBegin = std::numeric_limits<Version>::max();
+		std::vector<Version> removals;
+		for (auto ver = end_begin.rbegin(); !(ver == end_begin.rend());
+				ver++) {
+			if (ver->first > lastBegin)
+				removals.push_back(ver->first);
+			else
+				lastBegin = ver->second;
+		}
+
+		for (auto ver : removals)
+			end_begin.erase(ver);
+
+		std::string logVerInfo, verInfo;
+		for (auto& filename : existingFiles) {
+			if (filename == "restorable") {
+				foundRestorable = true;
+
+				// Store the restorable filename, if defined
+				if (pRestorableFile) {
+					*pRestorableFile = joinPath(folder, filename);
+				}
+			}
+
+			if (!getFileInfo(*pFileInfo, dataInfo, logInfo, filename,
+								folder, "backup", 1, ".kvdata")) {
+				if (filename.find("log") == 0 &&
+					filename.rfind(".trlog") == (filename.size() - 6)) {
+					logVerInfo = filename.substr(4, filename.size() - 10);
+					size_t offset = logVerInfo.find_first_of(',', 0);
+					versionText = logVerInfo.substr(0, offset);
+					Version beginVer = getVersionFromString(versionText);
+
+					versionText = logVerInfo.substr(offset + 1);
+					Version endVer = getVersionFromString(versionText);
+
+					if (beginVer == end_begin[endVer])
+						getFileInfo(*pFileInfo, dataInfo, logInfo, filename,
+									folder, "log", 0, ".trlog");
+				}
+			}
+		}
+	}
+
+	if (!foundRestorable) {
+		TraceEvent(SevError, "BA_restore")
+			.detail(
+				"foundRestorable",
+				"This backup does not contain all of the necessary files")
+			.detail("folders",
+					std::accumulate(folders.begin(), folders.end(),
+									std::string(", ")));
+		fprintf(stderr, "ERROR: The backup does not contain all of the "
+						"necessary files.\n");
+		throw restore_missing_data();
+	}
+
+	Version minRestoreVersion(LLONG_MAX);
+	if (!(dataInfo.rbegin() == dataInfo.rend()))
+		minRestoreVersion = *(dataInfo.rbegin());
+
+	Version maxRestoreVersion = -1;
+	if (!(logInfo.rbegin() == logInfo.rend())) {
+		std::string value = std::get<1>(logInfo.rbegin()->second);
+		int64_t version = getVersionFromString(value);
+		maxRestoreVersion = version - 1;
+	}
+
+	Version firstDataVersion = -1;
+	if (dataInfo.begin() != dataInfo.end())
+		firstDataVersion = *(dataInfo.begin());
+
+	Version firstLogVersion = LLONG_MAX;
+	if (logInfo.begin() != logInfo.end()) {
+		firstLogVersion = std::get<0>(logInfo.begin()->second);
+	}
+
+	TraceEvent("BA_getVersions")
+		.detail("minRestoreVersion", minRestoreVersion)
+		.detail("maxRestoreVersion", maxRestoreVersion)
+		.detail("firstLogVersion", firstLogVersion)
+		.detail("firstDataVersion", firstDataVersion);
+
+	if (firstLogVersion > firstDataVersion) {
+		TraceEvent(SevError, "BA_restore")
+			.detail("firstLogVersion", firstLogVersion)
+			.detail("firstDataVersion", firstDataVersion);
+		fprintf(stderr,
+				"ERROR: The first log version %lld is greater than "
+				"the first data version %lld\n",
+				(long long)firstLogVersion, (long long)firstDataVersion);
+		throw restore_invalid_version();
+	}
+
+	if (minRestoreVersion > maxRestoreVersion) {
+		TraceEvent(SevError, "BA_restore")
+			.detail("minRestoreVersion", minRestoreVersion)
+			.detail("maxRestoreVersion", maxRestoreVersion)
+			.detail("firstLogVersion", firstLogVersion)
+			.detail("firstDataVersion", firstDataVersion);
+		fprintf(stderr,
+				"ERROR: The last data version %lld is greater than "
+				"last log version %lld\n",
+				(long long)minRestoreVersion, (long long)maxRestoreVersion);
+		throw restore_invalid_version();
+	}
+
+	// Set the passed arguments, if defined
+	if (pMinRestoreVersion) {
+		*pMinRestoreVersion = minRestoreVersion;
+	}
+	if (pMaxRestoreVersion) {
+		*pMaxRestoreVersion = maxRestoreVersion;
+	}
+
+	return Void();
+}
+
+
+ACTOR static Future<Standalone<VectorRef<MutationRef>>> readLogFile(
+	Reference<LogInfo> logInfo, Version logBeginVersion, Version endVersion)
+{
+	ASSERT(logInfo);
+
+	state Standalone<VectorRef<MutationRef>> logValues;
+	loop
+	{
+		//const int BackupAgent::logHeaderSize = 12;
+		//state Key header = makeString(BackupAgent::logHeaderSize);
+		state Key header = makeString(12);
+		uint8_t* headerPtr = mutateString(header);
+		int length = wait(logInfo->logFile->read(
+			//headerPtr, BackupAgent::logHeaderSize, logInfo->offset));
+			headerPtr, 12, logInfo->offset));
+		if (length == 0)
+			return logValues;
+		//else if (length < BackupAgent::logHeaderSize)
+		else if (length < 12)
+			throw restore_corrupted_data();
+
+		logInfo->offset += length;
+		state int64_t version = 0;
+		memcpy(&version, header.begin(), sizeof(int64_t));
+		state int32_t size = 0;
+		memcpy(&size, header.begin() + sizeof(int64_t), sizeof(int32_t));
+		TraceEvent("BA_readLogFile")
+			.detail("version", version)
+			.detail("logBeginVersion", logBeginVersion)
+			.detail("endVersion", endVersion)
+			.detail("dataSize", size)
+			.detail("fileOffset", logInfo->offset)
+			.detail("logFile", logInfo->fileName);
+
+		ASSERT(version >= logBeginVersion);
+		state Key data = makeString(size);
+		uint8_t* dataPtr = mutateString(data);
+		if (version < endVersion) {
+			int length = wait(
+				logInfo->logFile->read(dataPtr, size, logInfo->offset));
+			if (length < size)
+				throw restore_corrupted_data();
+
+			logInfo->offset += length;
+			Standalone<VectorRef<MutationRef>> vec =
+				decodeBackupLogValue(data);
+
+			/*
+			for (auto it : vec) {
+					TraceEvent("BA_readLogFileMutations").detail("version_less_than_endVersion",
+			"").detail("version", version)
+							.detail("endVersion", endVersion).detail("type",
+			it.type).detail("p1",
+			printable(StringRef(it.param1))).detail("p2",
+			printable(StringRef(it.param2)));
+			}
+			*/
+
+			if (vec.size() > 0)
+				logValues.append_deep(logValues.arena(), vec.begin(),
+										vec.size());
+		} else {
+			TraceEvent("BA_readLogFile")
+				.detail("version_greater_than_endVersion", true)
+				.detail("version", version)
+				.detail("endVersion", endVersion);
+
+			/*
+			int length = wait(logInfo->logFile->read((void*)(data.c_str()),
+			size, logInfo->offset));
+			logInfo->offset += length;
+			std::vector<LogValueRef> vec = decodeBackupLogValue(data);
+
+			for (auto it : vec) {
+					TraceEvent("BA_readLogFile").detail("version_greater_than_endVersion",
+			"").detail("version", version).detail("endVersion",
+			endVersion).detail("type", it->type).detail("p1",
+			printable(StringRef(it->val1))).detail("p2",
+			printable(StringRef(it->val2)));
+			}
+			*/
+
+			//logInfo->offset -= BackupAgent::logHeaderSize;
+			logInfo->offset -= 12;
+
+			return logValues;
+		}
+	}
+}
+
+ACTOR static Future<Void> writeBackupData(Database cx,
+											RangeResultRef result,
+											KeyRangeRef range,
+											Future<Void> previous)
+{
+	state Transaction tr(cx);
+	wait(previous);
+	loop
+	{
+		try {
+			tr.clear(range);
+			for (int i = 0; i < result.size(); i++)
+				tr.set(result[i].key, result[i].value, false);
+			wait(tr.commit());
+			return Void();
+		} catch (Error& e) {
+			wait(tr.onError(e));
+		}
+	}
+}
+
+static int64_t getRestoreFlags()
+{
+#if defined(_WIN32)
+	return IAsyncFile::OPEN_READONLY;
+#else
+	return IAsyncFile::OPEN_READONLY | IAsyncFile::OPEN_UNCACHED |
+			IAsyncFile::OPEN_NO_AIO;
+#endif
+}
+
+static StringRef readSpl(StringRef& data, int bytes) {
+	if (bytes > data.size()) throw restore_error();
+	StringRef r = data.substr(0, bytes);
+	data = data.substr(bytes);
+	return r;
+}
+
+ACTOR static Future<Void> restoreBackupData(
+											Database cx,
+											std::string fileName,
+											Future<Void> previous)
+{
+	// TraceEvent("BA_restoreBackupData").detail("Restore_KV_data_from_file",
+	// fileName);
+
+	//state Reference<IAsyncFile> file =
+		//wait(g_network->open(fileName, getRestoreFlags(), 0644));
+	state Reference<IAsyncFile> file = wait(IAsyncFileSystem::filesystem()->open(fileName,
+																				 getRestoreFlags(),
+																				 0644));
+	state int64_t fileSize = wait(file->size());
+	state Standalone<StringRef> buffer = makeString(fileSize);
+	int _ = wait(file->read(mutateString(buffer), fileSize, 0));
+	// close file
+	file = Reference<IAsyncFile>();
+
+	//const int BackupAgent::dataFooterSize = 20;
+	StringRef footer = buffer.substr(fileSize - 20, 20);
+										//BackupAgent::dataFooterSize);
+	int32_t lenBeginKey = *((int32_t*)(footer.begin()));
+	int32_t lenEndKey = *((int32_t*)(footer.begin() + 4));
+	int64_t kvTotalLength =
+		//fileSize - BackupAgent::dataFooterSize - lenBeginKey - lenEndKey;
+		fileSize - 20 - lenBeginKey - lenEndKey;
+	state KeyRangeRef range =
+		KeyRangeRef(buffer.substr(kvTotalLength, lenBeginKey),
+					buffer.substr(kvTotalLength + lenBeginKey, lenEndKey));
+	state StringRef kvData = buffer.substr(0, kvTotalLength);
+
+	// TraceEvent("BA_restoreBackupData").detail("Restore_KV_data_from_file",
+	// fileName).detail("range", printable(range)).detail("kvTotalLength",
+	// kvTotalLength);
+	state Arena arena;
+	state RangeResultRef result;
+	state int totalSize = 0;
+	state std::vector<Future<Void>> writeActors;
+	state KeyRef beginKey = range.begin;
+	while (kvData.size()) {
+		StringRef header = readSpl(kvData, 8);
+		int32_t keyLength = *((int32_t*)(header.begin()));
+		int32_t valueLength = *((int32_t*)(header.begin() + 4));
+		KeyRef key = readSpl(kvData, keyLength);
+		ValueRef value = readSpl(kvData, valueLength);
+		result.push_back(arena, KeyValueRef(key, value));
+		totalSize += keyLength + valueLength;
+		if (totalSize > 100000) {
+			KeyRef endKey = kvData.size()
+								? keyAfter(result.end()[-1].key, arena)
+								: range.end;
+			writeActors.push_back(writeBackupData(
+				cx, result, KeyRangeRef(beginKey, endKey), previous));
+			beginKey = endKey;
+			result = Standalone<RangeResultRef>();
+			totalSize = 0;
+		}
+
+		wait(yield());
+	}
+
+	if (result.size())
+		writeActors.push_back(writeBackupData(
+			cx, result, KeyRangeRef(beginKey, range.end), previous));
+
+	wait(waitForAll(writeActors));
+	return Void();
+}
+
+ACTOR static Future<Void> writeLogData(
+	Database cx, Standalone<VectorRef<MutationRef>> logValues)
+{
+	state uint64_t dataSize(0);
+	state ReadYourWritesTransaction tr(cx);
+	state int idx(0);
+	state int startIndex(0);
+	state UID randomID = deterministicRandom()->randomUniqueID();
+	state std::vector<int> atomicLocations;
+	state std::vector<Future<Optional<Key>>> atomicValues;
+
+	// TraceEvent("BA_writeLogData_start", randomID).detail("logValues",
+	// logValues.size());
+
+	for (; idx < logValues.size(); ++idx) {
+		loop
+		{
+			try {
+				// TraceEvent("BA_writeLogData_mutation",
+				// randomID).detail("type",
+				// logValues[idx]->type).detail("p1",
+				// printable(StringRef(logValues[idx]->val1))).detail("p2",
+				// printable(StringRef(logValues[idx]->val2))).detail("size",
+				// logValues.size());
+				if (!logValues[idx].param1.startsWith(systemKeys.begin)) {
+					// TraceEvent("BA_writeLogData_normalmutation",
+					// randomID).detail("type",
+					// logValues[idx]->type).detail("p1",
+					// printable(StringRef(logValues[idx]->val1))).detail("p2",
+					// printable(StringRef(logValues[idx]->val2))).detail("size",
+					// logValues.size());
+					dataSize +=
+						logValues[idx].param1.size() +
+						logValues[idx].param2.size() +
+						CLIENT_KNOBS->BACKUP_OPERATION_COST_OVERHEAD;
+					if (logValues[idx].type == 0) {
+						tr.set(logValues[idx].param1,
+								logValues[idx].param2);
+					} else if (logValues[idx].type == 1) {
+						KeyRangeRef range(logValues[idx].param1,
+											std::min(logValues[idx].param2,
+													systemKeys.begin));
+						// TraceEvent("BA_writeLogData",
+						// randomID).detail("ClearRangeBegin",
+						// printable(range.begin)).detail("ClearRangeEnd",
+						// printable(range.end));
+						tr.clear(range);
+					} else if (isAtomicOp((MutationRef::Type)logValues[idx]
+												.type)) {
+						// TraceEvent("RestoringAtomicOp",
+						// randomID).detail("type",
+						// logValues[idx].type).detail("p1",
+						// printable(logValues[idx].param1)).detail("p2",
+						// printable(logValues[idx].param2));
+						tr.atomicOp(logValues[idx].param1,
+									logValues[idx].param2,
+									logValues[idx].type);
+						atomicLocations.push_back(idx);
+						atomicValues.push_back(
+							tr.get(logValues[idx].param1));
+					} else {
+						TraceEvent(SevError, "RestoringUnknownMutationType",
+									randomID)
+							.detail("type", logValues[idx].type)
+							.detail("p1", printable(logValues[idx].param1))
+							.detail("p2", printable(logValues[idx].param2));
+					}
+				}
+
+				if (dataSize >
+						(CLIENT_KNOBS->BACKUP_LOG_WRITE_BATCH_MAX_SIZE) ||
+					idx == logValues.size() - 1 ||
+					atomicValues.size() >
+						(CLIENT_KNOBS->BACKUP_LOG_ATOMIC_OPS_SIZE)) {
+					wait(waitForAll(atomicValues));
+					for (int i = 0; i < atomicLocations.size(); i++) {
+						logValues[atomicLocations[i]].type =
+							MutationRef::SetValue;
+						logValues[atomicLocations[i]].param2 =
+							atomicValues[i].get().get();
+						logValues.arena().dependsOn(
+							atomicValues[i].get().get().arena());
+					}
+					atomicLocations = std::vector<int>();
+					atomicValues = std::vector<Future<Optional<Key>>>();
+
+					// TraceEvent("BA_writeLogData",
+					// randomID).detail("dataSize", dataSize).detail("idx",
+					// idx).detail("logValues", logValues.size());
+					wait(tr.commit());
+
+					startIndex = idx + 1;
+					tr = ReadYourWritesTransaction(cx);
+					dataSize = 0;
+				}
+				break;
+			} catch (Error& e) {
+				wait(tr.onError(e));
+				atomicLocations = std::vector<int>();
+				atomicValues = std::vector<Future<Optional<Key>>>();
+				idx = startIndex;
+				dataSize = 0;
+			}
+		}
+	}
+
+	return Void();
+}
+
+ACTOR static Future<Reference<LogInfo>> restoreLogData(
+	Database cx, Reference<LogInfo> logInfo,
+	Version endVersion, std::string filename, Future<Void> prev)
+{
+	ASSERT(logInfo);
+
+	TraceEvent("BA_restoreLogData")
+		.detail("beginVersion", logInfo->beginVersion)
+		.detail("endVersion", endVersion)
+		.detail("logFile", logInfo->fileName)
+		.detail("logEndVersion", logInfo->endVersion);
+
+	state Reference<LogInfo> newLogInfo(new LogInfo());
+
+	if (!logInfo) {
+		TraceEvent(SevError, "BA_restoreLogData_Error")
+			.detail("MissingLogDataBeforeVersion", endVersion);
+		fprintf(stderr, "ERROR: Restore file `%s' is missing log data\n",
+				filename.c_str());
+		throw restore_missing_data();
+	}
+
+	if (logInfo->endVersion < endVersion) {
+		TraceEvent(SevError, "BA_restoreLogData_Error")
+			.detail("MissingLogDataBeforeVersion", endVersion)
+			.detail("LogBeginVersion", logInfo->beginVersion)
+			.detail("LogEndVersion", logInfo->endVersion);
+		fprintf(stderr,
+				"ERROR: Restore file `%s' are missing log data "
+				"before version %lld\n",
+				filename.c_str(), (long long)endVersion);
+		throw restore_missing_data();
+	}
+
+	ASSERT(logInfo->beginVersion < endVersion);
+
+	//  temp
+	state Standalone<VectorRef<MutationRef>> logValues =
+		wait(readLogFile(logInfo, logInfo->beginVersion, endVersion));
+
+	wait(prev);
+	wait(writeLogData(cx, logValues));
+
+	if (logInfo->endVersion == endVersion) {
+		// close log file
+		logInfo->logFile = Reference<IAsyncFile>();
+		return Reference<LogInfo>();
+	}
+
+	newLogInfo->fileName = logInfo->fileName;
+	newLogInfo->logFile = logInfo->logFile;
+	newLogInfo->beginVersion = endVersion;
+	newLogInfo->endVersion = logInfo->endVersion;
+	newLogInfo->offset = logInfo->offset;
+
+	return newLogInfo;
+}
+
+
+
+ACTOR Future<Version> restoreV3(Database cx,
+                                std::vector<std::string> folders,
+                                Version targetVersion,
+                                bool displayInfo)
+{
+
+    state std::multimap<int64_t, std::tuple<std::string, std::string,
+                                            std::string, std::string>>
+        fileInfo;
+    Version minRestoreVersion(LLONG_MAX);
+    Version maxRestoreVersion = -1;
+
+    // Get the folder information
+    getFolderMetaInfo(folders, &minRestoreVersion, &maxRestoreVersion,
+                      &fileInfo, NULL);
+
+    if (targetVersion <= 0)
+        targetVersion = maxRestoreVersion;
+
+    if (targetVersion < minRestoreVersion) {
+        TraceEvent(SevError, "BackupAgentRestore")
+            .detail("targetVersion", targetVersion)
+            .detail("less_than_minRestoreVersion", minRestoreVersion);
+        fprintf(stderr,
+                "ERROR: Restore version %lld is smaller than "
+                "minimum version %lld\n",
+                (long long)targetVersion, (long long)minRestoreVersion);
+        throw restore_invalid_version();
+    }
+
+    if (targetVersion > maxRestoreVersion) {
+        TraceEvent(SevError, "BackupAgentRestore")
+            .detail("targetVersion", targetVersion)
+            .detail("greater_than_maxRestoreVersion", maxRestoreVersion);
+        fprintf(stderr,
+                "ERROR: Restore version %lld is larger than "
+                "maximum version %lld\n",
+                (long long)targetVersion, (long long)maxRestoreVersion);
+        throw restore_invalid_version();
+    }
+
+    TraceEvent("BA_restore_start")
+        .detail("targetVersion", targetVersion)
+        .detail("minRestoreVersion", minRestoreVersion)
+        .detail("maxRestoreVersion", maxRestoreVersion);
+
+    // Display the restore information, if requested
+    if (displayInfo) {
+        printf("Restoring backup to version: %lld\n",
+                (long long)targetVersion);
+        //printf("%s\n", BackupAgent::getFolderInfo(folders).c_str());
+    }
+
+    state Reference<LogInfo> lastLog;
+    state std::string filename;
+    // type(backup/log); beginVersion; endVersion; filename;
+    state std::multimap<int64_t,
+                        std::tuple<std::string, std::string, std::string,
+                                    std::string>>::iterator it =
+        fileInfo.begin();
+    state Future<Void> backupRangeFuture = Void();
+    for (; it != fileInfo.end(); ++it) {
+        if (std::get<0>(it->second) == "backup") {
+            Version version = getVersionFromString(std::get<1>(it->second));
+            if ((lastLog) && (lastLog->beginVersion != (version + 1))) {
+                // Get compilation working, TODO: temp disable
+                Reference<LogInfo> theLog = wait(restoreLogData(
+                    cx, lastLog, (version + 1),
+                    std::get<3>(it->second), backupRangeFuture));
+                lastLog = theLog;
+            }
+            filename = std::get<3>(it->second);
+            TraceEvent("BA_restoring_backupfile")
+                .detail("filename", filename);
+            Future<Void> previous = backupRangeFuture;
+            // Get compilation working, TODO: temp disable
+            backupRangeFuture =
+                restoreBackupData(cx, filename, previous);
+            wait(previous);
+            TraceEvent("BA_restored_backupfile")
+                .detail("filename", filename);
+        } else if (std::get<0>(it->second) == "log") {
+            state Version beginVer =
+                getVersionFromString(std::get<1>(it->second));
+            state Version endVer =
+                getVersionFromString(std::get<2>(it->second));
+            if (beginVer > targetVersion)
+                break;
+            if (lastLog) {
+                // Get compilation working, TODO: temp disable
+                Reference<LogInfo> theLog = wait(restoreLogData(
+                    cx, lastLog, beginVer,
+                    std::get<3>(it->second), backupRangeFuture));
+                lastLog = theLog;
+            }
+
+            ASSERT(!lastLog);
+            lastLog = Reference<LogInfo>(new LogInfo());
+            lastLog->fileName = std::get<3>(it->second);
+            Reference<IAsyncFile> file = wait(IAsyncFileSystem::filesystem()->open(lastLog->fileName,
+																			  IAsyncFile::OPEN_CACHED_READ_ONLY | IAsyncFile::OPEN_NO_AIO,
+																			  0644));
+			// TODO: backport backup
+			//wait(g_network->open(
+              //lastLog->fileName,
+                //IAsyncFile::OPEN_CACHED_READ_ONLY | IAsyncFile::OPEN_NO_AIO,
+                //0644));
+            lastLog->logFile = file;
+            lastLog->beginVersion = beginVer;
+            lastLog->endVersion = endVer;
+        }
+    }
+
+    if (lastLog) {
+        Reference<LogInfo> theLog =
+            // Get compilation working, TODO: temp disable
+            wait(restoreLogData(cx, lastLog, targetVersion + 1,
+                                "aaa", backupRangeFuture));
+        lastLog = theLog;
+    }
+
+    wait(backupRangeFuture);
+
+    TraceEvent("BA_restore_complete")
+        .detail("Restored_to_version", targetVersion);
+    return targetVersion;
+}
