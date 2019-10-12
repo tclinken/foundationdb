@@ -201,8 +201,12 @@ void ThreadSafeTransaction::makeSelfConflicting() {
 	onMainThreadVoid( [tr](){ tr->makeSelfConflicting(); }, &tr->deferredError );
 }
 
-void ThreadSafeTransaction::atomicOp(const KeyRef& key, const ValueRef& value, uint32_t operationType) {
-	throw client_invalid_operation();
+void ThreadSafeTransaction::atomicOp( const KeyRef& key, const ValueRef& value, uint32_t operationType ) {
+	Key k = key;
+	Value v = value;
+
+	ReadYourWritesTransaction *tr = this->tr;
+	onMainThreadVoid( [tr, k, v, operationType](){ tr->atomicOp(k, v, operationType); }, &tr->deferredError );
 }
 
 void ThreadSafeTransaction::set( const KeyRef& key, const ValueRef& value ) {
