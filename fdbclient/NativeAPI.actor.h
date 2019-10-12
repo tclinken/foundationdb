@@ -287,6 +287,10 @@ public:
 	TransactionOptions options;
 	double startTime;
 	Reference<TransactionLogInfo> trLogInfo;
+
+	// Warning: does not add anything to write conflict range
+	void addMutationsRaw(VectorRef<MutationRef> mutations);
+
 private:
 	Future<Version> getReadVersion(uint32_t flags);
 	void setPriority(uint32_t priorityFlag);

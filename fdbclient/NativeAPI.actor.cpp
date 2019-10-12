@@ -3343,6 +3343,10 @@ Reference<TransactionLogInfo> Transaction::createTrLogInfoProbabilistically(cons
 	return Reference<TransactionLogInfo>();
 }
 
+void Transaction::addMutationsRaw(VectorRef<MutationRef> mutations) {
+	tr.transaction.mutations.append_deep(tr.arena, mutations.begin(), mutations.size());
+}
+
 void enableClientInfoLogging() {
 	ASSERT(networkOptions.logClientInfo.present() == false);
 	networkOptions.logClientInfo = true;
