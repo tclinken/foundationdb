@@ -4775,8 +4775,6 @@ ACTOR static Future<Void> restoreBackupData(
 	// TraceEvent("BA_restoreBackupData").detail("Restore_KV_data_from_file",
 	// fileName);
 
-	//state Reference<IAsyncFile> file =
-		//wait(g_network->open(fileName, getRestoreFlags(), 0644));
 	state Reference<IAsyncFile> file = wait(IAsyncFileSystem::filesystem()->open(fileName,
 																				 getRestoreFlags(),
 																				 0644));
@@ -5004,132 +5002,120 @@ ACTOR static Future<Reference<LogInfo>> restoreLogData(
 	return newLogInfo;
 }
 
-
-
 ACTOR Future<Version> restoreV3(Database cx,
                                 std::vector<std::string> folders,
                                 Version targetVersion,
                                 bool displayInfo)
 {
+	state std::multimap<int64_t, std::tuple<std::string, std::string,
+											std::string, std::string>>
+		fileInfo;
+	Version minRestoreVersion(LLONG_MAX);
+	Version maxRestoreVersion = -1;
 
-    state std::multimap<int64_t, std::tuple<std::string, std::string,
-                                            std::string, std::string>>
-        fileInfo;
-    Version minRestoreVersion(LLONG_MAX);
-    Version maxRestoreVersion = -1;
+	// Get the folder information
+	getFolderMetaInfo(folders, &minRestoreVersion, &maxRestoreVersion,
+						&fileInfo, NULL);
 
-    // Get the folder information
-    getFolderMetaInfo(folders, &minRestoreVersion, &maxRestoreVersion,
-                      &fileInfo, NULL);
+	if (targetVersion <= 0)
+		targetVersion = maxRestoreVersion;
 
-    if (targetVersion <= 0)
-        targetVersion = maxRestoreVersion;
+	if (targetVersion < minRestoreVersion) {
+		TraceEvent(SevError, "BackupAgentRestore")
+			.detail("targetVersion", targetVersion)
+			.detail("less_than_minRestoreVersion", minRestoreVersion);
+		fprintf(stderr,
+				"ERROR: Restore version %lld is smaller than "
+				"minimum version %lld\n",
+				(long long)targetVersion, (long long)minRestoreVersion);
+		throw restore_invalid_version();
+	}
 
-    if (targetVersion < minRestoreVersion) {
-        TraceEvent(SevError, "BackupAgentRestore")
-            .detail("targetVersion", targetVersion)
-            .detail("less_than_minRestoreVersion", minRestoreVersion);
-        fprintf(stderr,
-                "ERROR: Restore version %lld is smaller than "
-                "minimum version %lld\n",
-                (long long)targetVersion, (long long)minRestoreVersion);
-        throw restore_invalid_version();
-    }
+	if (targetVersion > maxRestoreVersion) {
+		TraceEvent(SevError, "BackupAgentRestore")
+			.detail("targetVersion", targetVersion)
+			.detail("greater_than_maxRestoreVersion", maxRestoreVersion);
+		fprintf(stderr,
+				"ERROR: Restore version %lld is larger than "
+				"maximum version %lld\n",
+				(long long)targetVersion, (long long)maxRestoreVersion);
+		throw restore_invalid_version();
+	}
 
-    if (targetVersion > maxRestoreVersion) {
-        TraceEvent(SevError, "BackupAgentRestore")
-            .detail("targetVersion", targetVersion)
-            .detail("greater_than_maxRestoreVersion", maxRestoreVersion);
-        fprintf(stderr,
-                "ERROR: Restore version %lld is larger than "
-                "maximum version %lld\n",
-                (long long)targetVersion, (long long)maxRestoreVersion);
-        throw restore_invalid_version();
-    }
+	TraceEvent("BA_restore_start")
+		.detail("targetVersion", targetVersion)
+		.detail("minRestoreVersion", minRestoreVersion)
+		.detail("maxRestoreVersion", maxRestoreVersion);
 
-    TraceEvent("BA_restore_start")
-        .detail("targetVersion", targetVersion)
-        .detail("minRestoreVersion", minRestoreVersion)
-        .detail("maxRestoreVersion", maxRestoreVersion);
+	// Display the restore information, if requested
+	if (displayInfo) {
+		printf("Restoring backup to version: %lld\n",
+				(long long)targetVersion);
+		//printf("%s\n", BackupAgent::getFolderInfo(folders).c_str());
+	}
 
-    // Display the restore information, if requested
-    if (displayInfo) {
-        printf("Restoring backup to version: %lld\n",
-                (long long)targetVersion);
-        //printf("%s\n", BackupAgent::getFolderInfo(folders).c_str());
-    }
+	state Reference<LogInfo> lastLog;
+	state std::string filename;
+	// type(backup/log); beginVersion; endVersion; filename;
+	state std::multimap<int64_t,
+						std::tuple<std::string, std::string, std::string,
+									std::string>>::iterator it =
+		fileInfo.begin();
+	state Future<Void> backupRangeFuture = Void();
+	for (; it != fileInfo.end(); ++it) {
+		if (std::get<0>(it->second) == "backup") {
+			Version version = getVersionFromString(std::get<1>(it->second));
+			if ((lastLog) && (lastLog->beginVersion != (version + 1))) {
+				Reference<LogInfo> theLog = wait(restoreLogData(
+					cx, lastLog, (version + 1),
+					std::get<3>(it->second), backupRangeFuture));
+				lastLog = theLog;
+			}
+			filename = std::get<3>(it->second);
+			TraceEvent("BA_restoring_backupfile")
+				.detail("filename", filename);
+			Future<Void> previous = backupRangeFuture;
+			backupRangeFuture =
+				restoreBackupData(cx, filename, previous);
+			wait(previous);
+			TraceEvent("BA_restored_backupfile")
+				.detail("filename", filename);
+		} else if (std::get<0>(it->second) == "log") {
+			state Version beginVer =
+				getVersionFromString(std::get<1>(it->second));
+			state Version endVer =
+				getVersionFromString(std::get<2>(it->second));
+			if (beginVer > targetVersion)
+				break;
+			if (lastLog) {
+				Reference<LogInfo> theLog = wait(restoreLogData(
+					cx, lastLog, beginVer,
+					std::get<3>(it->second), backupRangeFuture));
+				lastLog = theLog;
+			}
 
-    state Reference<LogInfo> lastLog;
-    state std::string filename;
-    // type(backup/log); beginVersion; endVersion; filename;
-    state std::multimap<int64_t,
-                        std::tuple<std::string, std::string, std::string,
-                                    std::string>>::iterator it =
-        fileInfo.begin();
-    state Future<Void> backupRangeFuture = Void();
-    for (; it != fileInfo.end(); ++it) {
-        if (std::get<0>(it->second) == "backup") {
-            Version version = getVersionFromString(std::get<1>(it->second));
-            if ((lastLog) && (lastLog->beginVersion != (version + 1))) {
-                // Get compilation working, TODO: temp disable
-                Reference<LogInfo> theLog = wait(restoreLogData(
-                    cx, lastLog, (version + 1),
-                    std::get<3>(it->second), backupRangeFuture));
-                lastLog = theLog;
-            }
-            filename = std::get<3>(it->second);
-            TraceEvent("BA_restoring_backupfile")
-                .detail("filename", filename);
-            Future<Void> previous = backupRangeFuture;
-            // Get compilation working, TODO: temp disable
-            backupRangeFuture =
-                restoreBackupData(cx, filename, previous);
-            wait(previous);
-            TraceEvent("BA_restored_backupfile")
-                .detail("filename", filename);
-        } else if (std::get<0>(it->second) == "log") {
-            state Version beginVer =
-                getVersionFromString(std::get<1>(it->second));
-            state Version endVer =
-                getVersionFromString(std::get<2>(it->second));
-            if (beginVer > targetVersion)
-                break;
-            if (lastLog) {
-                // Get compilation working, TODO: temp disable
-                Reference<LogInfo> theLog = wait(restoreLogData(
-                    cx, lastLog, beginVer,
-                    std::get<3>(it->second), backupRangeFuture));
-                lastLog = theLog;
-            }
+			ASSERT(!lastLog);
+			lastLog = Reference<LogInfo>(new LogInfo());
+			lastLog->fileName = std::get<3>(it->second);
+			Reference<IAsyncFile> file = wait(IAsyncFileSystem::filesystem()->open(lastLog->fileName,
+												IAsyncFile::OPEN_CACHED_READ_ONLY | IAsyncFile::OPEN_NO_AIO,
+												0644));
+			lastLog->logFile = file;
+			lastLog->beginVersion = beginVer;
+			lastLog->endVersion = endVer;
+		}
+	}
 
-            ASSERT(!lastLog);
-            lastLog = Reference<LogInfo>(new LogInfo());
-            lastLog->fileName = std::get<3>(it->second);
-            Reference<IAsyncFile> file = wait(IAsyncFileSystem::filesystem()->open(lastLog->fileName,
-																			  IAsyncFile::OPEN_CACHED_READ_ONLY | IAsyncFile::OPEN_NO_AIO,
-																			  0644));
-			// TODO: backport backup
-			//wait(g_network->open(
-              //lastLog->fileName,
-                //IAsyncFile::OPEN_CACHED_READ_ONLY | IAsyncFile::OPEN_NO_AIO,
-                //0644));
-            lastLog->logFile = file;
-            lastLog->beginVersion = beginVer;
-            lastLog->endVersion = endVer;
-        }
-    }
+	if (lastLog) {
+		Reference<LogInfo> theLog =
+			wait(restoreLogData(cx, lastLog, targetVersion + 1,
+								"aaa", backupRangeFuture));
+		lastLog = theLog;
+	}
 
-    if (lastLog) {
-        Reference<LogInfo> theLog =
-            // Get compilation working, TODO: temp disable
-            wait(restoreLogData(cx, lastLog, targetVersion + 1,
-                                "aaa", backupRangeFuture));
-        lastLog = theLog;
-    }
+	wait(backupRangeFuture);
 
-    wait(backupRangeFuture);
-
-    TraceEvent("BA_restore_complete")
-        .detail("Restored_to_version", targetVersion);
-    return targetVersion;
+	TraceEvent("BA_restore_complete")
+		.detail("Restored_to_version", targetVersion);
+	return targetVersion;
 }
