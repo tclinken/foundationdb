@@ -4647,17 +4647,13 @@ ACTOR static Future<Standalone<VectorRef<MutationRef>>> readLogFile(
 	state Standalone<VectorRef<MutationRef>> logValues;
 	loop
 	{
-		//const int BackupAgent::logHeaderSize = 12;
-		//state Key header = makeString(BackupAgent::logHeaderSize);
-		state Key header = makeString(12);
+		state Key header = makeString(BackupAgentBase::logHeaderSize);
 		uint8_t* headerPtr = mutateString(header);
 		int length = wait(logInfo->logFile->read(
-			//headerPtr, BackupAgent::logHeaderSize, logInfo->offset));
-			headerPtr, 12, logInfo->offset));
+			headerPtr, BackupAgentBase::logHeaderSize, logInfo->offset));
 		if (length == 0)
 			return logValues;
-		//else if (length < BackupAgent::logHeaderSize)
-		else if (length < 12)
+		else if (length < BackupAgentBase::logHeaderSize)
 			throw restore_corrupted_data();
 
 		logInfo->offset += length;
@@ -4721,8 +4717,7 @@ ACTOR static Future<Standalone<VectorRef<MutationRef>>> readLogFile(
 			}
 			*/
 
-			//logInfo->offset -= BackupAgent::logHeaderSize;
-			logInfo->offset -= 12;
+			logInfo->offset -= BackupAgentBase::logHeaderSize;
 
 			return logValues;
 		}
@@ -4784,14 +4779,13 @@ ACTOR static Future<Void> restoreBackupData(
 	// close file
 	file = Reference<IAsyncFile>();
 
-	//const int BackupAgent::dataFooterSize = 20;
-	StringRef footer = buffer.substr(fileSize - 20, 20);
-										//BackupAgent::dataFooterSize);
+	StringRef footer = buffer.substr(fileSize - FileBackupAgent::dataFooterSize,
+									 FileBackupAgent::dataFooterSize);
+
 	int32_t lenBeginKey = *((int32_t*)(footer.begin()));
 	int32_t lenEndKey = *((int32_t*)(footer.begin() + 4));
 	int64_t kvTotalLength =
-		//fileSize - BackupAgent::dataFooterSize - lenBeginKey - lenEndKey;
-		fileSize - 20 - lenBeginKey - lenEndKey;
+		fileSize - FileBackupAgent::dataFooterSize - lenBeginKey - lenEndKey;
 	state KeyRangeRef range =
 		KeyRangeRef(buffer.substr(kvTotalLength, lenBeginKey),
 					buffer.substr(kvTotalLength + lenBeginKey, lenEndKey));
