@@ -548,13 +548,61 @@ void MultiVersionTransaction::addReadConflictRange(const KeyRangeRef& keys) {
 }
 
 void MultiVersionTransaction::atomicOp(const KeyRef& key, const ValueRef& value, uint32_t operationType) {
-	throw client_invalid_operation();
+	auto tr = getTransaction();
+	if (tr.transaction) {
+		tr.transaction->atomicOp(key, value, operationType);
+	}
 }
 
+struct OnDbReady : ThreadCallback, ThreadSafeReferenceCounted<OnDbReady> {
+	bool canFire(int notMadeActive) override { return true; }
+	void fire(const Void& unused, int& userParam) override {
+		onMainThreadVoid(
+		    [this]() {
+			    auto tr = db->createTransaction();
+			    tr->set(LiteralStringRef("\xff\xff/cluster_file_path"), value);
+			    delref();
+		    },
+		    nullptr);
+	}
+	void error(const Error& e, int& userParam) override {
+		if (e.code() != error_code_operation_cancelled) {
+			TraceEvent(SevError, "OnDbReadyError").error(e).detail("ClientLibrary", this->client->libPath);
+		}
+		delref();
+	}
+	OnDbReady() = default;
+	Reference<ClientInfo> client;
+	Reference<IDatabase> db;
+	Value value;
+};
+
 void MultiVersionTransaction::set(const KeyRef& key, const ValueRef& value) {
-	auto tr = getTransaction();
-	if(tr.transaction) {
-		tr.transaction->set(key, value);
+	if (key == LiteralStringRef("\xff\xff/cluster_file_path")) {
+		onMainThreadVoid(
+		    [db = this->db, value = Value(value)] {
+			    for (const auto& connector : db->dbState->connectionAttempts) {
+				    connector->clusterFilePath = value.toString();
+				    ThreadFuture<Void> onReady;
+				    if (connector->client->external) {
+					    onReady = connector->candidateDatabase.castTo<DLDatabase>()->onReady();
+				    } else {
+					    onReady = ThreadFuture<Void>(Void());
+				    }
+				    Reference<OnDbReady> cb = Reference<OnDbReady>(new OnDbReady);
+				    cb->client = connector->client;
+				    cb->db = connector->candidateDatabase;
+				    cb->value = value;
+				    int userParam;
+				    onReady.callOrSetAsCallback(cb.extractPtr(), userParam, 0);
+			    }
+		    },
+		    nullptr);
+	} else {
+		auto tr = getTransaction();
+		if (tr.transaction) {
+			tr.transaction->set(key, value);
+		}
 	}
 }
 

@@ -1614,6 +1614,11 @@ void ReadYourWritesTransaction::set( const KeyRef& key, const ValueRef& value ) 
 		BinaryReader::fromStringRef<ClientWorkerInterface>(value, IncludeVersion()).reboot.send( RebootRequest(false, true) );
 		return;
 	}
+	if (key == LiteralStringRef("\xff\xff/cluster_file_path")) {
+		uncancellable(holdWhile(getDatabase(), getDatabase()->switchConnectionFile(Reference<ClusterConnectionFile>(
+		                                           new ClusterConnectionFile(value.toString())))));
+		return;
+	}
 	if (key == metadataVersionKey) {
 		throw client_invalid_operation();
 	}

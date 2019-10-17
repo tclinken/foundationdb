@@ -767,7 +767,9 @@ Reference<ClusterConnectionFile> DatabaseContext::getConnectionFile() {
 
 Future<Void> DatabaseContext::switchConnectionFile(Reference<ClusterConnectionFile> standby) {
 	ASSERT(switchable);
-	return switchConnectionFileImpl(standby, this);
+	switchActor.cancel();
+	switchActor = switchConnectionFileImpl(standby, this);
+	return switchActor;
 }
 
 Future<Void> DatabaseContext::connectionFileChanged() {
