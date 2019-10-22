@@ -4419,6 +4419,10 @@ Future<int> FileBackupAgent::waitBackup(Database cx, std::string tagName, bool s
 	return FileBackupAgentImpl::waitBackup(this, cx, tagName, stopWhenDone, pContainer, pUID);
 }
 
+// NOTE: The below section is a port of FDB3 restore logic into FDB6.
+// Except for API changes and compilation changes, the below code is a port of FDB3 restore logic.
+//
+
 //
 // File Information
 //
@@ -5113,3 +5117,5 @@ ACTOR Future<Version> restoreV3(Database cx,
 		.detail("Restored_to_version", targetVersion);
 	return targetVersion;
 }
+
+// END OF FDB3 Restore Port

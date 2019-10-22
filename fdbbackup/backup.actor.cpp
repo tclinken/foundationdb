@@ -3551,6 +3551,12 @@ int main(int argc, char* argv[]) {
 				case RESTORE_V3:
 					TraceEvent(SevInfo, "RestoreContainer")
 						.detail("Container", restoreContainer.substr(7));
+					// argument parsing appends file:// to the directory path, validate and strip that out
+					// before passing to v3 restore logic
+					if (restoreContainer.rfind("file://") != 0) {
+						fprintf(stderr, "restoreContainer path is invalid: %s\n", restoreContainer.c_str());
+						return FDB_EXIT_ERROR;
+					}
 					restoreFolders.push_back(restoreContainer.substr(7));
 					version = stopAfter( restoreV3(db, restoreFolders, restoreVersion, !quietDisplay) );
 					break;
