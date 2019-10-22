@@ -845,5 +845,11 @@ public:
 	}
 };
 
+// restores the FDB3 backup to FDB6 cluster
+ACTOR Future<Version> restoreV3(Database cx,
+                                std::vector<std::string> folders,
+                                Version targetVersion,
+                                bool displayInfo);
+
 #include "flow/unactorcompiler.h"
 #endif
