@@ -314,7 +314,7 @@ private:
 		void error(const Error& e, int& userParam);
 
 		const Reference<ClientInfo> client;
-		const std::string clusterFilePath;
+		std::string clusterFilePath;
 
 		const Reference<DatabaseState> dbState;
 
