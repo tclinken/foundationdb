@@ -548,10 +548,7 @@ void MultiVersionTransaction::addReadConflictRange(const KeyRangeRef& keys) {
 }
 
 void MultiVersionTransaction::atomicOp(const KeyRef& key, const ValueRef& value, uint32_t operationType) {
-	auto tr = getTransaction();
-	if (tr.transaction) {
-		tr.transaction->atomicOp(key, value, operationType);
-	}
+	throw client_invalid_operation();
 }
 
 struct OnDbReady : ThreadCallback, ThreadSafeReferenceCounted<OnDbReady> {
