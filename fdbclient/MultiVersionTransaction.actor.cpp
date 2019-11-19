@@ -1145,7 +1145,7 @@ void MultiVersionApi::setupNetwork() {
 	{
 		MutexHolder holder(lock);
 		try {
-			addExternalLibrary("/usr/lib64/external/libfdb_c.so");
+			addExternalLibrary("/usr/lib64/fdb3/libfdb_c.so");
 		} catch (Error& e) {
 			if (e.code() != error_code_file_not_found) {
 				throw;
