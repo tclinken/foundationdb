@@ -1214,6 +1214,15 @@ Future< Optional<Value> > ReadYourWritesTransaction::get( const Key& key, bool s
 		}
 	}
 
+	const auto getAddressPrefix = LiteralStringRef("\xff\xff/healthmetrics/getAddress/");
+	if (key.startsWith(getAddressPrefix)) {
+		if (tr.getDatabase().getPtr() && tr.getDatabase()->getConnectionFile()) {
+			return tr.getAddress(UID::fromString(key.removePrefix(getAddressPrefix).toString()));
+		} else {
+			return Optional<Value>();
+		}
+	}
+
 	if (key == LiteralStringRef("\xff\xff/cluster_file_path")) {
 		try {
 			if (tr.getDatabase().getPtr() && tr.getDatabase()->getConnectionFile()) {
