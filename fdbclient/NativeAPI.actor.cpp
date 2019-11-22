@@ -1140,13 +1140,13 @@ ACTOR Future<Optional<StorageServerInterface>> fetchServerInterface( Database cx
 	return decodeServerListValue(val.get());
 }
 
-ACTOR Future<Optional<Value>> getAddressActor(Database cx, UID serverUID, TransactionInfo info) {
-	state Optional<StorageServerInterface> ssi = wait(fetchServerInterface(cx, info, serverUID));
+ACTOR Future<Optional<Value>> getAddressActor(Database cx, UID serverUID, TransactionInfo info, Future<Version> ver) {
+	state Optional<StorageServerInterface> ssi = wait(fetchServerInterface(cx, info, serverUID, ver));
 	return ssi.present() ? Value(ssi.get().address().toString()) : Optional<Value>{};
 }
 
 Future<Optional<Value>> Transaction::getAddress(UID serverUID) {
-	return getAddressActor(cx, serverUID, info);
+	return getAddressActor(cx, serverUID, info, getReadVersion());
 }
 
 ACTOR Future<Optional<vector<StorageServerInterface>>> transactionalGetServerInterfaces( Future<Version> ver, Database cx, TransactionInfo info, vector<UID> ids ) {
