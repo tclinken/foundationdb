@@ -288,6 +288,8 @@ public:
 	double startTime;
 	Reference<TransactionLogInfo> trLogInfo;
 
+	Future<Optional<Value>> getAddress(UID serverUID);
+
 	// Warning: does not add anything to write conflict range
 	void addMutationsRaw(VectorRef<MutationRef> mutations);
 
