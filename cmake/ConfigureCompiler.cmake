@@ -3,6 +3,7 @@ set(USE_VALGRIND OFF CACHE BOOL "Compile for valgrind usage")
 set(ALLOC_INSTRUMENTATION OFF CACHE BOOL "Instrument alloc")
 set(WITH_UNDODB OFF CACHE BOOL "Use rr or undodb")
 set(USE_ASAN OFF CACHE BOOL "Compile with address sanitizer")
+set(USE_UBSAN OFF CACHE BOOL "Compile with undefined behavior sanitizer")
 set(FDB_RELEASE OFF CACHE BOOL "This is a building of a final release")
 set(USE_LD "DEFAULT" CACHE STRING "The linker to use for building: can be LD (system default, default choice), BFD, GOLD, or LLD")
 set(USE_LIBCXX OFF CACHE BOOL "Use libc++")
@@ -146,10 +147,21 @@ else()
   if(USE_ASAN)
     add_compile_options(
       -fsanitize=address
-      -DUSE_ASAN)
+      -DUSE_SANITIZER)
     set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=address")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
     set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS}    -fsanitize=address ${CMAKE_THREAD_LIBS_INIT}")
+  endif()
+
+  if(USE_UBSAN)
+    add_compile_options(
+      -fsanitize=undefined
+      # TODO(atn34) Re-enable -fsanitize=alignment once https://github.com/apple/foundationdb/issues/1434 is resolved
+      -fno-sanitize=alignment
+      -DUSE_SANITIZER)
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=undefined")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=undefined")
+    set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS}    -fsanitize=undefined ${CMAKE_THREAD_LIBS_INIT}")
   endif()
 
   if(PORTABLE_BINARY)
@@ -163,12 +175,15 @@ else()
       add_link_options(-static-libstdc++ -static-libgcc)
     endif()
   endif()
-  # Instruction sets we require to be supported by the CPU
-  add_compile_options(
-    -maes
-    -mmmx
-    -mavx
-    -msse4.2)
+  # # Instruction sets we require to be supported by the CPU
+  # TODO(atn34) Re-enable once https://github.com/apple/foundationdb/issues/1434 is resolved
+  # Some of the following instructions have alignment requirements, so it seems
+  # prudent to disable them until we properly align memory.
+  # add_compile_options(
+  #   -maes
+  #   -mmmx
+  #   -mavx
+  #   -msse4.2)
 
   if (USE_VALGRIND)
     add_compile_options(-DVALGRIND -DUSE_VALGRIND)
