@@ -1,0 +1,40 @@
+testTitle=SubmitBackup
+    testName=ContinuousBackup
+    backupDir=simfdb/backups/
+    simBackupAgents=BackupToFile
+    tag=default
+    submitOnly=true
+    runConsistencyCheck=false
+
+testTitle=CycleTest
+    testName=Cycle
+    nodeCount=3000
+    transactionsPerSecond=250.0
+    testDuration=30.0
+    expectedRate=0
+    clearAfterTest=false
+    runConsistencyCheck=false
+
+    testName=RandomClogging
+    testDuration=90.0
+
+    testName=Rollback
+    meanDelay=90.0
+    testDuration=90.0
+
+    testName=Attrition
+    machinesToKill=10
+    machinesToLeave=3
+    reboot=true
+    testDuration=90.0
+
+    testName=Attrition
+    machinesToKill=10
+    machinesToLeave=3
+    reboot=true
+    testDuration=90.0
+
+testTitle=AbortBackup
+    testName=ContinuousBackup
+    tag=default
+    abortOnly=true
