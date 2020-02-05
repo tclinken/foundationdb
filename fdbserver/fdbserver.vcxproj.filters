@@ -219,6 +219,9 @@
     <ActorCompiler Include="workloads\BackupCorrectness.actor.cpp">
       <Filter>workloads</Filter>
     </ActorCompiler>
+    <ActorCompiler Include="workloads\ContinuousBackup.actor.cpp">
+      <Filter>workloads</Filter>
+    </ActorCompiler>
     <ActorCompiler Include="workloads\TaskBucketCorrectness.actor.cpp">
       <Filter>workloads</Filter>
     </ActorCompiler>
