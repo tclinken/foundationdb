@@ -601,6 +601,8 @@ Applications must provide error handling and an appropriate retry loop around th
 
    |sets-and-clears2|
 
+   |transaction-clear-range-blurb|
+
    ``begin_key_name``
       A pointer to the name of the key specifying the beginning of the range to clear. |no-null|
 
@@ -663,6 +665,10 @@ Applications must provide error handling and an appropriate retry loop around th
     ``FDB_MUTATION_TYPE_XOR``
 
     |atomic-xor|
+
+    ``FDB_MUTATION_TYPE_COMPARE_AND_CLEAR``
+
+    |atomic-compare-and-clear|
 
     ``FDB_MUTATION_TYPE_MAX``
 

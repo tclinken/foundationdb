@@ -87,7 +87,7 @@ When you require the ``FDB`` gem, it exposes only one useful method:
 
 .. warning:: |api-version-multi-version-warning|
 
-For API changes between version 14 and |api-version| (for the purpose of porting older programs), see :doc:`release-notes`.
+For API changes between version 14 and |api-version| (for the purpose of porting older programs), see :doc:`release-notes` and :doc:`api-version-upgrade-guide`.
 
 Opening a database
 ==================
@@ -548,11 +548,15 @@ Writing data
 
     Removes all keys ``k`` such that ``begin <= k < end``, and their associated values. |immediate-return|
 
+    |transaction-clear-range-blurb|
+
     .. note:: Unlike in the case of :meth:`Transaction.get_range`, ``begin`` and ``end`` must be keys (:class:`String` or :class:`Key`), not :class:`KeySelector`\ s.  (Resolving arbitrary key selectors would prevent this method from returning immediately, introducing concurrency issues.)
 
 .. method:: Transaction.clear_range_start_with(prefix) -> nil
 
     Removes all the keys ``k`` such that ``k.start_with? prefix``, and their associated values. |immediate-return|
+
+    |transaction-clear-range-blurb|
 
 .. _api-ruby-transaction-atomic-operations:
 
@@ -592,6 +596,10 @@ In each of the methods below, ``param`` should be a string appropriately packed 
 .. method:: Transaction.bit_xor(key, param) -> nil
 
     |atomic-xor|
+
+.. method:: Transaction.compare_and_clear(key, param) -> nil
+
+    |atomic-compare-and-clear|
 
 .. method:: Transaction.max(key, param) -> nil
 

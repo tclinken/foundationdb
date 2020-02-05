@@ -98,7 +98,7 @@ When you import the ``fdb`` module, it exposes only one useful symbol:
 
 .. warning:: |api-version-multi-version-warning|
 
-For API changes between version 13 and |api-version| (for the purpose of porting older programs), see :doc:`release-notes`.
+For API changes between version 13 and |api-version| (for the purpose of porting older programs), see :doc:`release-notes` and :doc:`api-version-upgrade-guide`.
 
 Opening a database
 ==================
@@ -591,6 +591,8 @@ Writing data
 
     Removes all keys ``k`` such that ``begin <= k < end``, and their associated values. |immediate-return|
 
+    |transaction-clear-range-blurb|
+
     .. note :: Unlike in the case of :meth:`get_range`, ``begin`` and ``end`` must be keys (byte strings), not :class:`KeySelector`\ s.  (Resolving arbitrary key selectors would prevent this method from returning immediately, introducing concurrency issues.)
 
 ``del tr[begin:end]``
@@ -599,6 +601,8 @@ Writing data
 .. method:: Transaction.clear_range_startswith(prefix)
 
     Removes all the keys ``k`` such that ``k.startswith(prefix)``, and their associated values. |immediate-return|
+
+    |transaction-clear-range-blurb|
 
 .. _api-python-transaction-atomic-operations:
 
@@ -639,6 +643,10 @@ In each of the methods below, ``param`` should be a string appropriately packed 
 .. method:: Transaction.bit_xor(key, param)
 
     |atomic-xor|
+
+.. method:: Transaction.compare_and_clear(key, param)
+
+    |atomic-compare-and-clear|
 
 .. method:: Transaction.max(key, param)
 

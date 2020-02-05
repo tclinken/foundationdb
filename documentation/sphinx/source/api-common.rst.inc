@@ -111,6 +111,9 @@
 .. |atomic-xor| replace::
     Performs a bitwise "xor" operation. If the existing value in the database is not present or shorter than ``param``, it is first extended to the length of ``param`` with zero bytes. If ``param`` is shorter than the existing value in the database, the existing value is truncated to match the length of ``param``.
 
+.. |atomic-compare-and-clear| replace::
+   Performs an atomic ``compare and clear`` operation. If the existing value in the database is equal to the given value, then given key is cleared.
+
 .. |atomic-max1| replace::
     Sets the value in the database to the larger of the existing value and ``param``. If the existing value in the database is not present or shorter than ``param``, it is first extended to the length of ``param`` with zero bytes. If ``param`` is shorter than the existing value in the database, the existing value is truncated to match the length of ``param``.
 
@@ -191,6 +194,10 @@
 .. |transaction-watch-limit-blurb| replace::
 
     By default, each database connection can have no more than 10,000 watches that have not yet reported a change. When this number is exceeded, an attempt to create a watch will |error-raise-type| a :ref:`too_many_watches <developer-guide-error-codes>` |error-type|. This limit can be changed using |max-watches-database-option|. Because a watch outlives the transaction that creates it, any watch that is no longer needed should be cancelled by calling |future-cancel| on its returned future.
+
+.. |transaction-clear-range-blurb| replace::
+
+    Range clears are efficient with FoundationDB -- clearing large amounts of data will be fast. However, this will not immediately free up disk - data for the deleted range is cleaned up in the background. For purposes of computing the transaction size, only the begin and end keys of a clear range are counted. The size of the data stored in the range does not count against the transaction size limit.
 
 .. |conflict-range-note| replace::
 
