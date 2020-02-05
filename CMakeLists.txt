@@ -18,7 +18,7 @@
 # limitations under the License.
 cmake_minimum_required(VERSION 3.12)
 project(foundationdb
-  VERSION 6.2.12
+  VERSION 6.2.16
   DESCRIPTION "FoundationDB is a scalable, fault-tolerant, ordered key-value store with full ACID transactions."
   HOMEPAGE_URL "http://www.foundationdb.org/"
   LANGUAGES C CXX ASM)
@@ -95,9 +95,6 @@ if(USE_VERSIONS_TARGET)
   set(FDB_VERSION ${FDB_VERION_TARGET_FILE})
   set(FDB_PACKAGE_NAME ${FDB_PACKAGE_NAME_TARGET_FILE})
   set(FDB_VERSION_PLAIN ${FDB_VERSION})
-  if(NOT FDB_RELEASE)
-    set(FDB_VERSION "${FDB_VERSION}-PRERELEASE")
-  endif()
 else()
   set(FDB_PACKAGE_NAME "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
   set(FDB_VERSION ${PROJECT_VERSION})
