@@ -19,6 +19,12 @@ set(SRCS
 add_flow_target(STATIC_LIBRARY NAME fdb_flow SRCS ${SRCS})
 target_link_libraries(fdb_flow PUBLIC fdb_c)
 
+add_flow_target(EXECUTABLE NAME compare_key_range SRCS fdb_flow.actor.cpp fdb_flow.h CompareKeyRange.actor.cpp)
+target_link_libraries(compare_key_range PRIVATE fdb_c)
+
+set_target_properties(compare_key_range PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+set_target_properties(compare_key_range PROPERTIES INSTALL_RPATH /usr/lib64/fdb6/)
+
 add_subdirectory(tester)
 
 if(NOT OPEN_FOR_IDE)

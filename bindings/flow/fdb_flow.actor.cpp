@@ -220,7 +220,7 @@ namespace FDB {
 			}
 		}
 
-		if(apiVersion < 500 || apiVersion > FDB_API_VERSION) {
+		if(apiVersion < 300 || apiVersion > FDB_API_VERSION) {
 			throw api_version_not_supported();
 		}
 
