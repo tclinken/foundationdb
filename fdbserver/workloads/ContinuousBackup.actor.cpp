@@ -66,6 +66,13 @@ struct ContinuousBackupWorkload : TestWorkload {
 	}
 
 	ACTOR static Future<bool> _check(Database cx, ContinuousBackupWorkload* self) {
+		state Reference<IBackupContainer> lastBackupContainer;
+		state UID lastBackupUID;
+		wait(success(self->backupAgent.waitBackup(cx, self->tag.toString(), false, &lastBackupContainer, &lastBackupUID)));
+		printf("LastBackupContainerURL: %s\n", lastBackupContainer->getURL().c_str());
+		state BackupDescription backupDescription = wait(lastBackupContainer->describeBackup());
+		printf("%s\n", backupDescription.toString().c_str());
+
 		wait(self->backupAgent.abortBackup(cx, self->tag.toString()));
 		return true;
 	}
