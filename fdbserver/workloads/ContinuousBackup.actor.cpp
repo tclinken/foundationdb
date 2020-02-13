@@ -66,6 +66,7 @@ struct ContinuousBackupWorkload : TestWorkload {
 	}
 
 	ACTOR static Future<bool> _check(Database cx, ContinuousBackupWorkload* self) {
+		wait(delay(600));
 		wait(self->backupAgent.abortBackup(cx, self->tag.toString()));
 		return true;
 	}
