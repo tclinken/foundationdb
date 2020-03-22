@@ -2675,7 +2675,7 @@ ACTOR static Future<Void> tryCommit( Database cx, Reference<TransactionLogInfo> 
 	state TraceInterval interval( "TransactionCommit" );
 	state double startTime = now();
 	if (info.debugID.present())
-		TraceEvent(interval.begin()).detail( "Parent", info.debugID.get() );
+		TraceEvent(interval.begin()).detail("Parent", info.debugID.get());
 
 	try {
 		if(CLIENT_BUGGIFY) {
@@ -2694,7 +2694,7 @@ ACTOR static Future<Void> tryCommit( Database cx, Reference<TransactionLogInfo> 
 		if(info.debugID.present()) {
 			commitID = nondeterministicRandom()->randomUniqueID();
 			g_traceBatch.addAttach("CommitAttachID", info.debugID.get().first(), commitID.get().first());
-			g_traceBatch.addEvent("CommitDebug", commitID.get().first(), "NativeAPI.commit.Before");
+			g_traceBatch.addEvent("CommitDebug", commitID.get().first(), "NativeAPI.commit.Before", true);
 		}
 
 		req.debugID = commitID;
@@ -2739,7 +2739,7 @@ ACTOR static Future<Void> tryCommit( Database cx, Reference<TransactionLogInfo> 
 					cx->transactionCommittedMutationBytes += req.transaction.mutations.expectedSize();
 
 					if(info.debugID.present())
-						g_traceBatch.addEvent("CommitDebug", commitID.get().first(), "NativeAPI.commit.After");
+						g_traceBatch.addEvent("CommitDebug", commitID.get().first(), "NativeAPI.commit.After", true);
 
 					double latency = now() - startTime;
 					cx->commitLatencies.addSample(latency);
@@ -2752,7 +2752,7 @@ ACTOR static Future<Void> tryCommit( Database cx, Reference<TransactionLogInfo> 
 						TraceEvent(interval.end()).detail("Conflict", 1);
 
 					if(info.debugID.present())
-						g_traceBatch.addEvent("CommitDebug", commitID.get().first(), "NativeAPI.commit.After");
+						g_traceBatch.addEvent("CommitDebug", commitID.get().first(), "NativeAPI.commit.After", true);
 
 					throw not_committed();
 				}
@@ -2886,6 +2886,8 @@ ACTOR Future<Void> commitAndWatch(Transaction *self) {
 			self->setupWatches();
 		}
 
+		if (self->info.debugID.present())
+			g_traceBatch.addEvent("CommitDebug", self->info.debugID.get().first(), "NativeAPI.commit.End", true);
 		self->reset();
 		return Void();
 	}
@@ -2904,6 +2906,8 @@ ACTOR Future<Void> commitAndWatch(Transaction *self) {
 }
 
 Future<Void> Transaction::commit() {
+	if (info.debugID.present())
+		g_traceBatch.addEvent("CommitDebug", info.debugID.get().first(), "NativeAPI.commit.Begin", true);
 	ASSERT(!committing.isValid());
 	committing = commitAndWatch(this);
 	return committing;

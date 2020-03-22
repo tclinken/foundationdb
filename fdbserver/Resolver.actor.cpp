@@ -114,7 +114,7 @@ ACTOR Future<Void> resolveBatch(
 	if(req.debugID.present()) {
 		debugID = nondeterministicRandom()->randomUniqueID();
 		g_traceBatch.addAttach("CommitAttachID", req.debugID.get().first(), debugID.get().first());
-		g_traceBatch.addEvent("CommitDebug",debugID.get().first(),"Resolver.resolveBatch.Before");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "Resolver.resolveBatch.Before", true);
 	}
 
 	/*TraceEvent("ResolveBatchStart", self->dbgid).detail("From", proxyAddress).detail("Version", req.version).detail("PrevVersion", req.prevVersion).detail("StateTransactions", req.txnStateTransactions.size())
@@ -131,7 +131,7 @@ ACTOR Future<Void> resolveBatch(
 	}
 
 	if(debugID.present()) {
-		g_traceBatch.addEvent("CommitDebug",debugID.get().first(),"Resolver.resolveBatch.AfterQueueSizeCheck");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "Resolver.resolveBatch.AfterQueueSizeCheck", true);
 	}
 
 	loop {
@@ -165,8 +165,8 @@ ACTOR Future<Void> resolveBatch(
 		proxyInfo.lastVersion = req.version;
 
 		if(req.debugID.present())
-			g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "Resolver.resolveBatch.AfterOrderer");
-		
+			g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "Resolver.resolveBatch.AfterOrderer", true);
+
 		vector<int> commitList;
 		vector<int> tooOldList;
 
@@ -276,7 +276,7 @@ ACTOR Future<Void> resolveBatch(
 		}
 
 		if(req.debugID.present())
-			g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "Resolver.resolveBatch.After");
+			g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "Resolver.resolveBatch.After", true);
 	}
 	else {
 		TEST(true); // Duplicate resolve batch request

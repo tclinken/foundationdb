@@ -891,6 +891,10 @@ ACTOR Future<Void> recoverFrom( Reference<MasterData> self, Reference<ILogSystem
 }
 
 ACTOR Future<Void> getVersion(Reference<MasterData> self, GetCommitVersionRequest req) {
+	if (req.debugID.present())
+		g_traceBatch.addEvent("CommitDebug", req.debugID.get().first(), "MasterServer.commitBatch.BeforeGetVersion",
+		                      true);
+
 	state std::map<UID, ProxyVersionReplies>::iterator proxyItr = self->lastProxyVersionReplies.find(req.requestingProxy); // lastProxyVersionReplies never changes
 
 	if (proxyItr == self->lastProxyVersionReplies.end()) {
@@ -905,11 +909,17 @@ ACTOR Future<Void> getVersion(Reference<MasterData> self, GetCommitVersionReques
 	auto itr = proxyItr->second.replies.find(req.requestNum);
 	if (itr != proxyItr->second.replies.end()) {
 		TEST(true); // Duplicate request for sequence
+		if (req.debugID.present())
+			g_traceBatch.addEvent("CommitDebug", req.debugID.get().first(), "MasterServer.commitBatch.AfterGetVersion",
+			                      true);
 		req.reply.send(itr->second);
 	}
 	else if(req.requestNum <= proxyItr->second.latestRequestNum.get()) {
 		TEST(true); // Old request for previously acknowledged sequence - may be impossible with current FlowTransport implementation
 		ASSERT( req.requestNum < proxyItr->second.latestRequestNum.get() );  // The latest request can never be acknowledged
+		if (req.debugID.present())
+			g_traceBatch.addEvent("CommitDebug", req.debugID.get().first(), "MasterServer.commitBatch.AfterGetVersion",
+			                      true);
 		req.reply.send(Never());
 	}
 	else {
@@ -948,6 +958,9 @@ ACTOR Future<Void> getVersion(Reference<MasterData> self, GetCommitVersionReques
 		proxyItr->second.replies.erase(proxyItr->second.replies.begin(), proxyItr->second.replies.upper_bound(req.mostRecentProcessedRequestNum));
 		proxyItr->second.replies[req.requestNum] = rep;
 		ASSERT(rep.prevVersion >= 0);
+		if (req.debugID.present())
+			g_traceBatch.addEvent("CommitDebug", req.debugID.get().first(), "MasterServer.commitBatch.AfterGetVersion",
+			                      true);
 		req.reply.send(rep);
 
 		ASSERT(proxyItr->second.latestRequestNum.get() == req.requestNum - 1);

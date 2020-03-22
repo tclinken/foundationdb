@@ -1727,7 +1727,7 @@ ACTOR Future<Void> tLogCommit(
 	{
 		tlogDebugID = nondeterministicRandom()->randomUniqueID();
 		g_traceBatch.addAttach("CommitAttachID", req.debugID.get().first(), tlogDebugID.get().first());
-		g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.BeforeWaitForVersion");
+		g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.BeforeWaitForVersion", true);
 	}
 
 	logData->minKnownCommittedVersion = std::max(logData->minKnownCommittedVersion, req.minKnownCommittedVersion);
@@ -1758,7 +1758,7 @@ ACTOR Future<Void> tLogCommit(
 
 	if (logData->version.get() == req.prevVersion) {  // Not a duplicate (check relies on critical section between here self->version.set() below!)
 		if(req.debugID.present())
-			g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.Before");
+			g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.Before", true);
 
 		//TraceEvent("TLogCommit", logData->logId).detail("Version", req.version);
 		commitMessages(self, logData, req.version, req.arena, req.messages);
@@ -1782,7 +1782,7 @@ ACTOR Future<Void> tLogCommit(
 		logData->version.set( req.version );
 
 		if(req.debugID.present())
-			g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.AfterTLogCommit");
+			g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.AfterTLogCommit", true);
 	}
 	// Send replies only once all prior messages have been received and committed.
 	state Future<Void> stopped = logData->stopCommit.onTrigger();
@@ -1795,7 +1795,7 @@ ACTOR Future<Void> tLogCommit(
 	}
 
 	if(req.debugID.present())
-		g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.After");
+		g_traceBatch.addEvent("CommitDebug", tlogDebugID.get().first(), "TLog.tLogCommit.After", true);
 
 	req.reply.send( logData->durableKnownCommittedVersion );
 	return Void();

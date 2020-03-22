@@ -36,7 +36,7 @@ void logOnReceive(X x) { }
 
 void logOnReceive(CommitTransactionRequest x) {
 	if(x.debugID.present())
-		g_traceBatch.addEvent("CommitDebug", x.debugID.get().first(), "MasterProxyServer.batcher");
+		g_traceBatch.addEvent("CommitDebug", x.debugID.get().first(), "MasterProxyServer.batcher", true);
 }
 
 template <class X>

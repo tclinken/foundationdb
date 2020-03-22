@@ -118,7 +118,7 @@ inline void save( Archive& ar, const TraceEventFields& value ) {
 
 class TraceBatch {
 public:
-	void addEvent( const char *name, uint64_t id, const char *location );
+	void addEvent(const char* name, uint64_t id, const char* location, bool includeExactTime = false);
 	void addAttach( const char *name, uint64_t id, uint64_t to );
 	void addBuggify( int activated, int line, std::string file );
 	void dump();
@@ -126,7 +126,7 @@ public:
 private:
 	struct EventInfo {
 		TraceEventFields fields;
-		EventInfo(double time, const char *name, uint64_t id, const char *location); 
+		EventInfo(double time, const char* name, uint64_t id, const char* location, bool includeExactTime = false);
 	};
 
 	struct AttachInfo {

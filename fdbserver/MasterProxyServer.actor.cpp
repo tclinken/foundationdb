@@ -419,7 +419,8 @@ ACTOR Future<Void> commitBatcher(ProxyCommitData *commitData, PromiseStream<std:
 					++commitData->stats.txnCommitIn;
 
 					if(req.debugID.present()) {
-						g_traceBatch.addEvent("CommitDebug", req.debugID.get().first(), "MasterProxyServer.batcher");
+						g_traceBatch.addEvent("CommitDebug", req.debugID.get().first(), "MasterProxyServer.batcher",
+						                      true);
 					}
 
 					if(!batch.size()) {
@@ -529,7 +530,7 @@ ACTOR Future<Void> commitBatch(
 	}
 
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.Before");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.Before", true);
 
 	/////// Phase 1: Pre-resolution processing (CPU bound except waiting for a version # which is separately pipelined and *should* be available by now (unless empty commit); ordered; currently atomic but could yield)
 	TEST(self->latestLocalCommitBatchResolving.get() < localBatchNumber-1); // Queuing pre-resolution commit processing 
@@ -537,9 +538,11 @@ ACTOR Future<Void> commitBatch(
 	state Future<Void> releaseDelay = delay(std::min(SERVER_KNOBS->MAX_PROXY_COMPUTE, batchOperations*self->commitComputePerOperation[latencyBucket]), TaskPriority::ProxyMasterVersionReply);
 
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.GettingCommitVersion");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(),
+		                      "MasterProxyServer.commitBatch.GettingCommitVersion", true);
 
-	GetCommitVersionRequest req(self->commitVersionRequestNumber++, self->mostRecentProcessedRequestNumber, self->dbgid);
+	GetCommitVersionRequest req(self->commitVersionRequestNumber++, self->mostRecentProcessedRequestNumber, self->dbgid,
+	                            debugID);
 	GetCommitVersionReply versionReply = wait( brokenPromiseToNever(self->master.getCommitVersion.getReply(req, TaskPriority::ProxyMasterVersionReply)) );
 	self->mostRecentProcessedRequestNumber = versionReply.requestNum;
 
@@ -558,7 +561,8 @@ ACTOR Future<Void> commitBatch(
 	//TraceEvent("ProxyGotVer", self->dbgid).detail("Commit", commitVersion).detail("Prev", prevVersion);
 
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.GotCommitVersion");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.GotCommitVersion",
+		                      true);
 
 	ResolutionRequestBuilder requests( self, commitVersion, prevVersion, self->version );
 	int conflictRangeCount = 0;
@@ -579,6 +583,9 @@ ACTOR Future<Void> commitBatch(
 	// Sending these requests is the fuzzy border between phase 1 and phase 2; it could conceivably overlap with resolution processing but is still using CPU
 	self->stats.txnCommitResolving += trs.size();
 	vector< Future<ResolveTransactionBatchReply> > replies;
+	if (debugID.present())
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(),
+		                      "MasterProxyServer.commitBatch.SendResolutionRequest", true);
 	for (int r = 0; r<self->resolvers.size(); r++) {
 		requests.requests[r].debugID = debugID;
 		replies.push_back(brokenPromiseToNever(self->resolvers[r].resolve.getReply(requests.requests[r], TaskPriority::ProxyResolverReply)));
@@ -591,7 +598,8 @@ ACTOR Future<Void> commitBatch(
 	state vector<ResolveTransactionBatchReply> resolution = wait( getAll(replies) );
 
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.AfterResolution");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.AfterResolution",
+		                      true);
 
 	////// Phase 3: Post-resolution processing (CPU bound except for very rare situations; ordered; currently atomic but doesn't need to be)
 	TEST(self->latestLocalCommitBatchLogging.get() < localBatchNumber-1); // Queuing post-resolution commit processing 
@@ -603,7 +611,8 @@ ACTOR Future<Void> commitBatch(
 	self->stats.txnCommitResolved += trs.size();
 
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.ProcessingMutations");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.ProcessingMutations",
+		                      true);
 
 	state Arena arena;
 	state bool isMyFirstBatch = !self->version;
@@ -962,7 +971,8 @@ ACTOR Future<Void> commitBatch(
 	state LogSystemDiskQueueAdapter::CommitMessage msg = storeCommits.back().first.get();
 
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.AfterStoreCommits");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.AfterStoreCommits",
+		                      true);
 
 	// txnState (transaction subsystem state) tag: message extracted from log adapter
 	bool firstMessage = true;
@@ -1037,7 +1047,7 @@ ACTOR Future<Void> commitBatch(
 
 	//TraceEvent("ProxyPushed", self->dbgid).detail("PrevVersion", prevVersion).detail("Version", commitVersion);
 	if (debugID.present())
-		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.AfterLogPush");
+		g_traceBatch.addEvent("CommitDebug", debugID.get().first(), "MasterProxyServer.commitBatch.AfterLogPush", true);
 
 	for (auto &p : storeCommits) {
 		ASSERT(!p.second.isReady());
@@ -1060,6 +1070,9 @@ ACTOR Future<Void> commitBatch(
 	// Send replies to clients
 	double endTime = g_network->timer();
 	for (int t = 0; t < trs.size(); t++) {
+		if (trs[t].debugID.present())
+			g_traceBatch.addEvent("CommitDebug", trs[t].debugID.get().first(),
+			                      "MasterProxyServer.commitBatch.ReplyToProxy", true);
 		if (committed[t] == ConflictBatch::TransactionCommitted && (!locked || trs[t].isLockAware())) {
 			ASSERT_WE_THINK(commitVersion != invalidVersion);
 			trs[t].reply.send(CommitID(commitVersion, t, metadataVersionAfter));

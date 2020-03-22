@@ -146,14 +146,17 @@ struct GetCommitVersionRequest {
 	uint64_t mostRecentProcessedRequestNum;
 	UID requestingProxy;
 	ReplyPromise<GetCommitVersionReply> reply;
+	Optional<UID> debugID;
 
 	GetCommitVersionRequest() { }
-	GetCommitVersionRequest(uint64_t requestNum, uint64_t mostRecentProcessedRequestNum, UID requestingProxy)
-		: requestNum(requestNum), mostRecentProcessedRequestNum(mostRecentProcessedRequestNum), requestingProxy(requestingProxy) {}
+	GetCommitVersionRequest(uint64_t requestNum, uint64_t mostRecentProcessedRequestNum, UID requestingProxy,
+	                        Optional<UID> debugID)
+	  : requestNum(requestNum), mostRecentProcessedRequestNum(mostRecentProcessedRequestNum),
+	    requestingProxy(requestingProxy), debugID(debugID) {}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, requestNum, mostRecentProcessedRequestNum, requestingProxy, reply);
+		serializer(ar, requestNum, mostRecentProcessedRequestNum, requestingProxy, reply, debugID);
 	}
 };
 

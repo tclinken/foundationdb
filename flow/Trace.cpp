@@ -1054,8 +1054,8 @@ TraceInterval& TraceInterval::begin() {
 	return *this;
 }
 
-void TraceBatch::addEvent( const char *name, uint64_t id, const char *location ) {
-	eventBatch.push_back( EventInfo(TraceEvent::getCurrentTime(), name, id, location));
+void TraceBatch::addEvent(const char* name, uint64_t id, const char* location, bool includeExactTime) {
+	eventBatch.push_back(EventInfo(TraceEvent::getCurrentTime(), name, id, location, includeExactTime));
 	if( g_network->isSimulated() || FLOW_KNOBS->AUTOMATIC_TRACE_DUMP )
 		dump();
 }
@@ -1112,12 +1112,17 @@ void TraceBatch::dump() {
 	buggifyBatch.clear();
 }
 
-TraceBatch::EventInfo::EventInfo(double time, const char *name, uint64_t id, const char *location) {
+TraceBatch::EventInfo::EventInfo(double time, const char* name, uint64_t id, const char* location,
+                                 bool includeExactTime) {
 	fields.addField("Severity", format("%d", (int)SevInfo));
 	fields.addField("Time", format("%.6f", time));
 	fields.addField("Type", name);
 	fields.addField("ID", format("%016" PRIx64, id));
 	fields.addField("Location", location);
+	if (includeExactTime)
+		fields.addField("MicroSeconds", format("%ld", std::chrono::duration_cast<std::chrono::microseconds>(
+		                                                  std::chrono::high_resolution_clock::now().time_since_epoch())
+		                                                  .count()));
 }
 
 TraceBatch::AttachInfo::AttachInfo(double time, const char *name, uint64_t id, uint64_t to) {

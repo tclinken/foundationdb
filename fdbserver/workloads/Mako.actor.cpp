@@ -8,7 +8,7 @@
 
 enum {OP_GETREADVERSION, OP_GET, OP_GETRANGE, OP_SGET, OP_SGETRANGE, OP_UPDATE, OP_INSERT, OP_INSERTRANGE, OP_CLEAR, OP_SETCLEAR, OP_CLEARRANGE, OP_SETCLEARRANGE, OP_COMMIT, MAX_OP};
 enum {OP_COUNT, OP_RANGE};
-constexpr int MAXKEYVALUESIZE = 1000;
+// constexpr int MAXKEYVALUESIZE = 1000;
 constexpr int RANGELIMIT = 10000;
 struct MakoWorkload : TestWorkload {
 	uint64_t rowCount, seqNumLen, sampleSize, actorCountPerClient, keyBytes, maxValueBytes, minValueBytes;
@@ -68,26 +68,26 @@ struct MakoWorkload : TestWorkload {
 		seqNumLen = digits(rowCount);
 		// check keyBytes, maxValueBytes is valid
 		ASSERT(seqNumLen + KEYPREFIXLEN <= keyBytes);
-		ASSERT(keyBytes <= MAXKEYVALUESIZE);
-		ASSERT(maxValueBytes <= MAXKEYVALUESIZE);
+		// ASSERT(keyBytes <= MAXKEYVALUESIZE);
+		// ASSERT(maxValueBytes <= MAXKEYVALUESIZE);
 		// user input: a sequence of operations to be executed; e.g. "g10i5" means to do GET 10 times and Insert 5 times
 		// One operation type is defined as "<Type><Count>" or "<Type><Count>:<Range>".
 		// When Count is omitted, it's equivalent to setting it to 1.  (e.g. "g" is equivalent to "g1")
 		// Multiple operation types can be concatenated.  (e.g. "g9u1" = 9 GETs and 1 update)
 		// For RANGE operations, "Range" needs to be specified in addition to "Count".
 		// Below are all allowed inputs:
-		 	// g – GET
-			// gr – GET RANGE
-			// sg – Snapshot GET
-			// sgr – Snapshot GET RANGE
-			// u – Update (= GET followed by SET)
-			// i – Insert (= SET with a new key)
-			// ir – Insert Range (Sequential)
-			// c – CLEAR
-			// sc – SET & CLEAR
-			// cr – CLEAR RANGE
-			// scr – SET & CLEAR RANGE
-			// grv – GetReadVersion()
+		// g – GET
+		// gr – GET RANGE
+		// sg – Snapshot GET
+		// sgr – Snapshot GET RANGE
+		// u – Update (= GET followed by SET)
+		// i – Insert (= SET with a new key)
+		// ir – Insert Range (Sequential)
+		// c – CLEAR
+		// sc – SET & CLEAR
+		// cr – CLEAR RANGE
+		// scr – SET & CLEAR RANGE
+		// grv – GetReadVersion()
 		// Every transaction is committed unless it contains only GET / GET RANGE operations.
 		operationsSpec = getOption(options, LiteralStringRef("operations"), LiteralStringRef("g100")).contents().toString();
 		//  parse the sequence and extract operations to be executed
@@ -279,6 +279,10 @@ struct MakoWorkload : TestWorkload {
 		loop {
 			// used for throttling
 			wait(poisson(&lastTime, delay));
+			if (deterministicRandom()->randomInt(0, 100) == 0) {
+				UID debugID((0xabcdabcdll << 32) | deterministicRandom()->randomInt64(0, 1ll << 32), 0);
+				tr.debugTransaction(debugID);
+			}
 			try{
 				// user-defined value: whether commit read-only ops or not; default is false
 				doCommit = self->commitGet;
