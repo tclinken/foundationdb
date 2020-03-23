@@ -1311,6 +1311,9 @@ Future<Void> Transaction::warmRange(Database cx, KeyRange keys) {
 ACTOR Future<Optional<Value>> getValue( Future<Version> version, Key key, Database cx, TransactionInfo info, Reference<TransactionLogInfo> trLogInfo )
 {
 	state Version ver = wait( version );
+	if (info.debugID.present())
+		g_traceBatch.addEvent("TransactionDebug", info.debugID.get().first(), "NativeAPI.getValue.GotReadVersion",
+		                      true);
 	cx->validateVersion(ver);
 
 	loop {
@@ -1367,11 +1370,12 @@ ACTOR Future<Optional<Value>> getValue( Future<Version> version, Key key, Databa
 			cx->getValueCompleted->log();
 
 			if( info.debugID.present() ) {
-				g_traceBatch.addEvent("GetValueDebug", getValueID.get().first(), "NativeAPI.getValue.After"); //.detail("TaskID", g_network->getCurrentTask());
+				g_traceBatch.addEvent("GetValueDebug", getValueID.get().first(), "NativeAPI.getValue.After",
+				                      true); //.detail("TaskID", g_network->getCurrentTask());
 				/*TraceEvent("TransactionDebugGetValueDone", getValueID.get())
-					.detail("Key", key)
-					.detail("ReqVersion", ver)
-					.detail("ReplySize", reply.value.present() ? reply.value.get().size() : -1);*/
+				    .detail("Key", key)
+				    .detail("ReqVersion", ver)
+				    .detail("ReplySize", reply.value.present() ? reply.value.get().size() : -1);*/
 			}
 
 			cx->transactionBytesRead += reply.value.present() ? reply.value.get().size() : 0;
@@ -2098,6 +2102,8 @@ void Transaction::setVersion( Version v ) {
 }
 
 Future<Optional<Value>> Transaction::get( const Key& key, bool snapshot ) {
+	if (info.debugID.present())
+		g_traceBatch.addEvent("TransactionDebug", info.debugID.get().first(), "NativeAPI.get.Before", true);
 	++cx->transactionLogicalReads;
 	++cx->transactionGetValueRequests;
 	//ASSERT (key < allKeys.end);
