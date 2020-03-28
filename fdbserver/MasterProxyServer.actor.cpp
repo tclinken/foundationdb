@@ -1072,7 +1072,7 @@ ACTOR Future<Void> commitBatch(
 	for (int t = 0; t < trs.size(); t++) {
 		if (trs[t].debugID.present())
 			g_traceBatch.addEvent("CommitDebug", trs[t].debugID.get().first(),
-			                      "MasterProxyServer.commitBatch.ReplyToProxy", true);
+			                      "MasterProxyServer.commitBatch.ReplyToClient", true);
 		if (committed[t] == ConflictBatch::TransactionCommitted && (!locked || trs[t].isLockAware())) {
 			ASSERT_WE_THINK(commitVersion != invalidVersion);
 			trs[t].reply.send(CommitID(commitVersion, t, metadataVersionAfter));
