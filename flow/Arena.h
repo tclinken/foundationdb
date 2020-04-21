@@ -694,9 +694,8 @@ inline bool operator <= ( const StringRef& lhs, const StringRef& rhs ) { return 
 inline bool operator >= ( const StringRef& lhs, const StringRef& rhs ) { return !(lhs<rhs); }
 
 // This trait is used by VectorRef to determine if it should just memcpy the vector contents.
-// FIXME:  VectorRef really should use std::is_trivially_copyable for this BUT that is not implemented
-// in gcc c++0x so instead we will use this custom trait which defaults to std::is_trivial, which
-// handles most situations but others will have to be specialized.
+// std::is_trivially_copyable can't be used because some classes such as StringRef are
+// trivially copyable, but shouldn't use memcpy for deep copies.
 template <typename T>
 struct memcpy_able : std::is_trivial<T> {};
 
