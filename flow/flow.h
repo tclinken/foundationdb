@@ -536,8 +536,8 @@ public:
 	int getFutureReferenceCount() const { return futures; }
 	int getPromiseReferenceCount() const { return promises; }
 
-	virtual void destroy() { delete this; }
-	virtual void cancel() {}
+	virtual void destroy() override { delete this; }
+	virtual void cancel() override {}
 
 	void addCallbackAndDelFutureRef(Callback<T>* cb) {
 		// We are always *logically* dropping one future reference from this, but if we are adding a first callback
@@ -560,10 +560,8 @@ public:
 		cb->insertChain(this);
 	}
 
-	virtual void unwait() {
-		delFutureRef();
-	}
-	virtual void fire() { ASSERT(false); }
+	virtual void unwait() override { delFutureRef(); }
+	virtual void fire(T const&) override { ASSERT(false); }
 };
 
 template <class T>
@@ -644,10 +642,9 @@ struct NotifiedQueue : private SingleCallback<T>, FastAllocated<NotifiedQueue<T>
 		ASSERT(SingleCallback<T>::next == this);
 		cb->insert(this);
 	}
-	virtual void unwait() {
-		delFutureRef();
-	}
-	virtual void fire() { ASSERT(false); }
+	virtual void unwait() override { delFutureRef(); }
+	virtual void fire(T const&) override { ASSERT(false); }
+	virtual void fire(T&&) override { ASSERT(false); }
 };
 
 
@@ -1006,12 +1003,8 @@ struct Actor<void> {
 
 template <class ActorType, int CallbackNumber, class ValueType>
 struct ActorCallback : Callback<ValueType> {
-	virtual void fire(ValueType const& value) {
-		static_cast<ActorType*>(this)->a_callback_fire(this, value);
-	}
-	virtual void error(Error e) {
-		static_cast<ActorType*>(this)->a_callback_error(this, e);
-	}
+	virtual void fire(ValueType const& value) override { static_cast<ActorType*>(this)->a_callback_fire(this, value); }
+	virtual void error(Error e) override { static_cast<ActorType*>(this)->a_callback_error(this, e); }
 };
 
 template <class ActorType, int CallbackNumber, class ValueType>
